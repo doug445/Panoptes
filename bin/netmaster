@@ -1,0 +1,1306 @@
+#!/usr/bin/bash
+#
+# Panoptes — the all-seeing network watch
+# https://github.com/doug445/Panoptes
+#
+# Copyright (c) 2026 William MacKinnon <spilled-bowline0j@icloud.com>
+# SPDX-License-Identifier: MIT
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+# netmaster — single-entry Wi-Fi / internet repair for Fedora Asahi (Apple Silicon).
+#
+# Supersedes and absorbs: asahi-netfix.sh, warp-purge.sh, kill-warp-nm.sh,
+# fix-warp-killswitch.sh, mac-test.sh. Delegates to (but does not require)
+# wifi-recover.sh, netrescue, audit-dns.sh, dns-toggle, warp-killswitch.
+#
+# ---------------------------------------------------------------------------
+# THE OUTAGE THIS WAS BUILT FROM  (M2Max, 2026-08-13)
+#
+#   Symptom:  Wi-Fi associates, LAN works, zero internet. Survives reboot.
+#             Stopping/disabling/masking warp-svc changes nothing.
+#             warp-killswitch down AND up both change nothing.
+#
+#   Cause:    NetworkManager had ADOPTED Cloudflare WARP's externally-created
+#             `CloudflareWARP` tun as an external connection. Running
+#             `nmcli con mod <that-uuid> connection.zone drop` (asahi-drop-zone
+#             install.sh does exactly this) PERSISTED that ephemeral profile to
+#             /etc/NetworkManager/system-connections/ — 10 KB, autoconnect=yes,
+#             with WARP's ~314 split-tunnel routes frozen in as STATIC
+#             ipv4.routeN= entries.
+#
+#             From then on NM recreated the tun and reinstalled 314 routes on
+#             every network change, with warp-svc dead. 0.0.0.0/5, 8.0.0.0/7,
+#             32.0.0.0/3 ... are all more specific than `default via <gw>`, so
+#             every internet packet went into a NO-CARRIER tunnel. The LAN
+#             survived because 192.168.0.0/24 is more specific still — which is
+#             what made it look like a DNS or upstream fault.
+#
+#   Why every tool missed it:
+#     - warp-killswitch / warp-svc do not own the profile. NM does.
+#     - warp-killswitch's discover_tables() greps `table [0-9]+` — numeric ids
+#       only. The routes lived in `main`, which never matches.
+#     - `ip route del <line>` cannot remove them: route lines print a trailing
+#       `linkdown` STATUS flag which is not valid input, so every delete fails
+#       (silently, if stderr is discarded). Must flush BY DEVICE.
+#     - dracut/hostonly=no was blamed for a week. It was innocent — it was just
+#       the most recent change. (The USB keyboard at the LUKS prompt was never
+#       broken either; it needs ~10s for tps6598x + Type-C PHY negotiation.)
+#
+#   Durable fix, now enforced by `netmaster harden`:
+#       /etc/NetworkManager/conf.d/99-warp-unmanaged.conf
+#           [keyfile]
+#           unmanaged-devices=interface-name:CloudflareWARP
+#     Unmanaged => NM never creates a profile => it can never be persisted.
+#     Firewall posture is unchanged: no NM zone binding means the interface
+#     falls through to firewalld's default zone, which is already `drop`.
+#
+# ---------------------------------------------------------------------------
+# THE ONE RULE
+#   Repair in ladder order, verify after every rung, STOP the moment internet
+#   returns. Never remove the default route. Back up before every change.
+# ---------------------------------------------------------------------------
+#
+# Usage:
+#   netmaster                  # same as: diagnose
+#   netmaster diagnose         # read-only triage + verdict          (no changes)
+#   netmaster fix              # escalating repair ladder, stops when internet is back
+#   netmaster status           # one-screen health summary           (no changes)
+#   netmaster harden           # (re)install the durable guards      (idempotent)
+#   netmaster portal           # captive-portal mode: plain DNS, stable MAC, WARP off
+#   netmaster panic            # nuclear: strip to plain DHCP + plain DNS, no VPN
+#   netmaster restore          # undo portal/panic, return to hardened posture
+#   netmaster warp on|off|reset|status
+#   netmaster wifi             # deep Wi-Fi / brcmfmac capture + driver reload
+#   netmaster undo             # revert the last netmaster change set
+#   netmaster bundle           # tar the logs up to carry away
+#
+# Flags:  --dry-run   show what would change, touch nothing
+#         --yes       do not prompt
+#         --verbose   echo every command
+#
+# exFAT does not preserve the exec bit — from the USB, invoke via `bash`.
+
+set -uo pipefail
+LC_ALL=C; export LC_ALL
+umask 022
+
+# Aliases in this user's rc files rebind rm/cp/mv (-i), cat->bat, find->fd,
+# du->ncdu, install->dnf. Absolute paths throughout, no exceptions.
+IP=/usr/sbin/ip;            [ -x "$IP" ] || IP=/usr/bin/ip
+NFT=/usr/sbin/nft;          [ -x "$NFT" ] || NFT=/usr/bin/nft
+NM=/usr/bin/nmcli
+SCTL=/usr/bin/systemctl
+FW=/usr/bin/firewall-cmd
+RESOLVECTL=/usr/bin/resolvectl
+CURL=/usr/bin/curl          # NOT `curl` — /usr/local/bin/curl is the ECH build
+DIG=/usr/bin/dig
+PING=/usr/bin/ping
+ARPING=/usr/sbin/arping;    [ -x "$ARPING" ] || ARPING=/usr/bin/arping
+CHATTR=/usr/bin/chattr
+LSATTR=/usr/bin/lsattr
+GREP=/usr/bin/grep
+AWK=/usr/bin/awk
+SED=/usr/bin/sed
+CAT=/usr/bin/cat
+CP=/usr/bin/cp
+RM=/usr/bin/rm
+MKDIR=/usr/bin/mkdir
+TAR=/usr/bin/tar
+IW=/usr/sbin/iw;            [ -x "$IW" ] || IW=/usr/bin/iw
+RFKILL=/usr/sbin/rfkill;    [ -x "$RFKILL" ] || RFKILL=/usr/bin/rfkill
+
+WARP_IF=CLOUDFLARE_PLACEHOLDER; WARP_IF=CloudflareWARP
+WARP_CONF=/etc/NetworkManager/conf.d/99-warp-unmanaged.conf
+RESOLVED_CONF=/etc/systemd/resolved.conf
+KILLSWITCH=/usr/local/bin/warp-killswitch
+STATE_DIR=/var/lib/asahi-netmaster
+
+# ===========================================================================
+# arg parsing
+# ===========================================================================
+CMD=""; DRY=0; ASSUME_YES=0; VERBOSE=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run) DRY=1 ;;
+        --yes|-y)  ASSUME_YES=1 ;;
+        --verbose|-v) VERBOSE=1 ;;
+        -h|--help) $SED -n '3,95p' "$0" | $SED -e 's/^#//' -e 's/^ //'; exit 0 ;;
+        -*) echo "unknown flag: $1" >&2; exit 2 ;;
+        *)  if [ -z "$CMD" ]; then CMD="$1"; else ARGS="${ARGS:-} $1"; fi ;;
+    esac
+    shift
+done
+CMD="${CMD:-diagnose}"
+ARGS="${ARGS:-}"
+
+case "$CMD" in
+    diagnose|fix|status|harden|portal|panic|restore|warp|wifi|undo|bundle) ;;
+    *) echo "netmaster: unknown command '$CMD'" >&2
+       echo "try: netmaster --help" >&2; exit 2 ;;
+esac
+
+# ===========================================================================
+# elevate
+# ===========================================================================
+if [ "$(/usr/bin/id -u)" -ne 0 ]; then
+    RE=(); [ "$DRY" -eq 1 ] && RE+=(--dry-run)
+    [ "$ASSUME_YES" -eq 1 ] && RE+=(--yes)
+    [ "$VERBOSE" -eq 1 ] && RE+=(--verbose)
+    exec /usr/bin/sudo -- /usr/bin/bash "$0" "$CMD" ${ARGS:+$ARGS} ${RE+"${RE[@]}"}
+fi
+
+# ===========================================================================
+# logging — always beside the REAL script, wherever that is
+# ===========================================================================
+# Resolve through symlinks: /usr/local/bin/netmaster is a symlink into
+# ~/Projects/netmaster, and logs must land in the project folder, not /usr/local/bin.
+# `readlink -f` chases the whole chain; the plain-dirname form is the fallback
+# for the case where the script is piped or readlink is unavailable.
+SELF=$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null) || SELF="${BASH_SOURCE[0]}"
+[ -n "$SELF" ] || SELF="${BASH_SOURCE[0]}"
+SCRIPT_DIR=$(cd -- "$(/usr/bin/dirname -- "$SELF")" >/dev/null 2>&1 && /usr/bin/pwd -P)
+STAMP=$(/usr/bin/date +%Y%m%d-%H%M%S)
+
+LOGDIR="$SCRIPT_DIR/logs"
+if ! $MKDIR -p "$LOGDIR" 2>/dev/null || ! : >"$LOGDIR/.wtest" 2>/dev/null; then
+    # read-only medium (or a stale USB mount) — never lose the log, fall back
+    LOGDIR=/var/log/netmaster; $MKDIR -p "$LOGDIR"
+    echo "!! $SCRIPT_DIR/logs not writable — logging to $LOGDIR" >&2
+fi
+$RM -f "$LOGDIR/.wtest" 2>/dev/null
+LOG="$LOGDIR/netmaster-$CMD-$STAMP.log"
+
+# We run under sudo, so everything we create here is root-owned. Hand the log
+# directory back to the human who invoked us, or they cannot read their own logs.
+own_back() {
+    [ -n "${SUDO_UID:-}" ] || return 0
+    /usr/bin/chown -R "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" "$LOGDIR" 2>/dev/null || true
+}
+trap own_back EXIT
+
+# Wi-Fi PSKs and WARP keys are cleartext in the files we cat. Scrub on the way out.
+scrub() {
+    $SED -E \
+      -e 's/((psk|preshared-key|private-key|secret_key|api_token|password|passwd|secret|wep-key[0-9]*)[[:space:]]*[":=]+[[:space:]]*"?)[^",]*/\1<redacted>/Ig' \
+      -e 's/(PrivateKey[[:space:]]*=[[:space:]]*).*/\1<redacted>/I'
+}
+exec > >(scrub | /usr/bin/tee "$LOG") 2>&1
+
+# Undo journal: every mutating action appends a shell line here.
+$MKDIR -p "$STATE_DIR"; /usr/bin/chmod 0700 "$STATE_DIR"
+BAKDIR="$STATE_DIR/backups/$STAMP"          # local disk: holds PSKs, never the USB
+UNDO="$STATE_DIR/undo-$STAMP.sh"
+
+# ===========================================================================
+# output helpers
+# ===========================================================================
+if [ -t 1 ]; then
+    C_R=$'\033[31m'; C_G=$'\033[32m'; C_Y=$'\033[33m'; C_B=$'\033[1;36m'; C_0=$'\033[0m'
+else C_R=; C_G=; C_Y=; C_B=; C_0=; fi
+
+FLAGS=0
+hdr()  { echo; echo "${C_B}== $* ==${C_0}"; }
+ok()   { echo "${C_G}[ ok ]${C_0} $*"; }
+bad()  { echo "${C_R}[FLAG]${C_0} $*"; FLAGS=$((FLAGS+1)); }
+warn() { echo "${C_Y}[warn]${C_0} $*"; }
+info() { echo "[info] $*"; }
+step() { echo; echo "${C_B}--> $*${C_0}"; }
+
+# act — the ONLY way this script mutates anything.
+#   act "<human description>" "<undo command>" <command...>
+# Honours --dry-run, records the undo line, echoes under --verbose.
+act() {
+    local desc="$1" undo="$2"; shift 2
+    if [ "$DRY" -eq 1 ]; then
+        echo "  ${C_Y}would:${C_0} $desc"
+        [ "$VERBOSE" -eq 1 ] && echo "         \$ $*"
+        return 0
+    fi
+    [ "$VERBOSE" -eq 1 ] && echo "         \$ $*"
+    if "$@" >/dev/null 2>&1; then
+        echo "  ${C_G}did:${C_0}   $desc"
+        [ -n "$undo" ] && echo "$undo" >> "$UNDO"
+        return 0
+    else
+        echo "  ${C_R}FAILED:${C_0} $desc"
+        return 1
+    fi
+}
+
+backup_file() {
+    local f="$1"
+    [ -f "$f" ] || return 0
+    [ "$DRY" -eq 1 ] && return 0
+    $MKDIR -p "$BAKDIR"; /usr/bin/chmod 0700 "$BAKDIR"
+    local dest="$BAKDIR/$(echo "${f#/}" | /usr/bin/tr / _)"
+    $CP -a "$f" "$dest" 2>/dev/null && echo "$CP -a '$dest' '$f'" >> "$UNDO"
+}
+
+# sibling <relative/path> — locate a companion kit wherever it happens to live.
+# The kits move between ~/Projects and the exFAT USB, so search both plus
+# whatever directory netmaster itself was resolved into.
+sibling() {
+    local rel="$1" root
+    {
+        for root in "$SCRIPT_DIR/.." /home/*/Projects /run/media/*/*/ /media/*/*/; do
+            [ -e "$root/$rel" ] && /usr/bin/readlink -f -- "$root/$rel"
+        done
+    } 2>/dev/null | /usr/bin/sort -u   # $SCRIPT_DIR/.. and ~/Projects are often the same dir
+}
+
+confirm() {
+    [ "$ASSUME_YES" -eq 1 ] && return 0
+    [ "$DRY" -eq 1 ] && return 0
+    [ -t 0 ] || return 0
+    local r; /usr/bin/printf '%s [y/N] ' "$1"; read -r r
+    case "$r" in y|Y|yes|YES) return 0 ;; *) echo "aborted."; return 1 ;; esac
+}
+
+# ===========================================================================
+# probes — every one hard-bounded. With DNS dead, unbounded probes hang forever.
+# ===========================================================================
+WIFI_IF=""; GW=""; SSID=""
+discover() {
+    WIFI_IF=$($IP -o link show 2>/dev/null | $AWK -F': ' '/wl|wlan/{print $2; exit}')
+    [ -z "$WIFI_IF" ] && WIFI_IF=$($NM -t -f DEVICE,TYPE device 2>/dev/null | $AWK -F: '$2=="wifi"{print $1; exit}')
+    GW=$($IP -4 route show default 2>/dev/null | $AWK '/default/{print $3; exit}')
+    SSID=$($IW dev "${WIFI_IF:-lo}" link 2>/dev/null | $AWK -F': ' '/SSID/{print $2; exit}')
+}
+
+L2=0; L3=0; TCP=0; DNS=0
+ladder() {
+    L2=0; L3=0; TCP=0; DNS=0
+    # L2 by ARP first. Many routers (and every motel AP with client isolation)
+    # drop ICMP echo while layer 2 is perfectly healthy — never conclude
+    # "association problem" from ping alone.
+    if [ -n "$GW" ]; then
+        /usr/bin/timeout 8 $ARPING -c2 -w3 -I "${WIFI_IF:-lo}" "$GW" >/dev/null 2>&1 && L2=1
+        [ "$L2" -eq 0 ] && /usr/bin/timeout 8 $PING -c2 -W2 -n "$GW" >/dev/null 2>&1 && L2=1
+    fi
+    /usr/bin/timeout 10 $PING -c2 -W2 -n 1.1.1.1 >/dev/null 2>&1 && L3=1
+    [ "$L3" -eq 0 ] && /usr/bin/timeout 10 $PING -c2 -W2 -n 9.9.9.9 >/dev/null 2>&1 && L3=1
+    # TCP:443 direct, by IP. Separates ICMP filtering from a real outage.
+    /usr/bin/timeout 8 /usr/bin/bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>/dev/null && TCP=1
+    [ "$TCP" -eq 0 ] && /usr/bin/timeout 8 /usr/bin/bash -c 'exec 3<>/dev/tcp/9.9.9.9/443' 2>/dev/null && TCP=1
+    /usr/bin/timeout 8 $DIG +time=2 +tries=1 +short cloudflare.com @1.1.1.1 2>/dev/null | $GREP -qE '^[0-9]' && DNS=1
+}
+online() { [ "$L3" -eq 1 ] || [ "$TCP" -eq 1 ]; }
+
+ladder_line() { echo "[info] ladder: L2(gw)=$L2  L3(ping)=$L3  TCP443=$TCP  DNS=$DNS"; }
+
+verdict() {
+    if [ -z "$GW" ]; then
+        bad "NO DEFAULT ROUTE — nothing can reach the internet. DHCP or the NM profile is the problem."
+    elif [ "$L2" -eq 0 ]; then
+        bad "gateway $GW answers neither ARP nor ICMP — layer 2 / association problem, not DNS, not WARP."
+    elif [ "$L3" -eq 0 ] && [ "$TCP" -eq 0 ]; then
+        bad "gateway reachable but NOTHING upstream — routing blackhole or a firewall drop."
+    elif [ "$L3" -eq 0 ] && [ "$TCP" -eq 1 ]; then
+        ok "ICMP filtered but TCP:443 works — the internet is actually UP. Suspect DNS only."
+    elif [ "$DNS" -eq 0 ]; then
+        bad "upstream IP reachable but DNS fails — resolver problem (AdGuard DoT unreachable, or resolved misconfigured)."
+    else
+        ok "IP and DNS both work — any remaining breakage is app or proxy level."
+    fi
+}
+
+# ===========================================================================
+# DETECTORS — pure, no side effects. Each sets a global the fixers consume.
+# ===========================================================================
+
+# D1. Routes pointing into a device that is down. THE killer. Highest priority.
+BLACKHOLE_DEVS=""; BLACKHOLE_N=0
+detect_blackhole() {
+    BLACKHOLE_N=$($IP -4 route show 2>/dev/null | $GREP -c 'linkdown')
+    BLACKHOLE_DEVS=$($IP -4 route show 2>/dev/null | $GREP 'linkdown' \
+        | $GREP -oE 'dev [^ ]+' | $AWK '{print $2}' | /usr/bin/sort -u | /usr/bin/tr '\n' ' ')
+    BLACKHOLE_DEVS="${BLACKHOLE_DEVS% }"
+}
+
+# D2. NM profiles for tunnel devices that carry STATIC routes. THE root cause.
+#     A legitimate VPN never needs these: the daemon installs its own routes at
+#     connect time. Their presence means NM persisted an adopted external tun.
+POISON_PROFILES=""
+detect_poison_profiles() {
+    POISON_PROFILES=""
+    local f n
+    for f in /etc/NetworkManager/system-connections/*.nmconnection; do
+        [ -f "$f" ] || continue
+        $GREP -qE '^type=(tun|tap|wireguard|vpn)' "$f" || continue
+        n=$($GREP -cE '^route[0-9]+=' "$f")
+        [ "${n:-0}" -ge 4 ] || continue
+        POISON_PROFILES="$POISON_PROFILES $f:$n"
+    done
+    POISON_PROFILES="${POISON_PROFILES# }"
+}
+
+# D3. initrd-generated NM profiles shadowing the real ones.
+#     NM writes its own volatile lo/nm-generated profiles here legitimately —
+#     those must NOT be flagged. Only real device profiles are suspicious.
+SHADOW_PROFILES=""
+detect_shadow_profiles() {
+    SHADOW_PROFILES=""
+    local f
+    for f in /run/NetworkManager/system-connections/*.nmconnection; do
+        [ -f "$f" ] || continue
+        $GREP -qE '^type=loopback' "$f" && continue
+        $GREP -qE '^(nm-generated|volatile)=true' "$f" && continue
+        SHADOW_PROFILES="$SHADOW_PROFILES $f"
+    done
+    SHADOW_PROFILES="${SHADOW_PROFILES# }"
+}
+
+# D4. firewalld drop-zone lockout: default zone is `drop` and a live NIC has no
+#     explicit zone, so it inherited DROP and lost even its ICMP accept.
+FW_LOCKOUT=""
+detect_fw_lockout() {
+    FW_LOCKOUT=""
+    $SCTL is-active --quiet firewalld 2>/dev/null || return 0
+    local def; def=$($FW --get-default-zone 2>/dev/null)
+    [ "$def" = drop ] || return 0
+    local uuid type name z
+    while IFS=: read -r uuid type name; do
+        case "$type" in 802-11-wireless|802-3-ethernet|bond|bridge|vlan)
+            z=$($NM -g connection.zone con show uuid "$uuid" 2>/dev/null)
+            [ -z "$z" ] && FW_LOCKOUT="$FW_LOCKOUT $uuid|$name"
+        ;; esac
+    done < <($NM -t -f UUID,TYPE,NAME con show 2>/dev/null)
+    FW_LOCKOUT="${FW_LOCKOUT# }"
+}
+
+# D5. warp-killswitch state machine consistency.
+KS_KILLED=0; KS_IMMUTABLE=0; KS_RELOCK=0
+detect_killswitch() {
+    [ -f "$RESOLVED_CONF.warpkill-bak" ] && KS_KILLED=1 || KS_KILLED=0
+    [ -f "$RESOLVED_CONF.warpkill-relock" ] && KS_RELOCK=1 || KS_RELOCK=0
+    KS_IMMUTABLE=0
+    $LSATTR "$RESOLVED_CONF" 2>/dev/null | $AWK 'NR==1{print $1}' | $GREP -q 'i' && KS_IMMUTABLE=1
+}
+
+# D6. brcmfmac / Asahi per-machine vendor firmware.
+#     Asahi Wi-Fi needs NVRAM extracted from the Mac's own firmware partition.
+#     Wrong calibration => associates, gets DHCP, LAN fine, throughput broken.
+FW_ERRS=0
+detect_brcmfmac() {
+    FW_ERRS=0
+    /usr/bin/dmesg 2>/dev/null | $GREP -qiE 'brcmfmac.*(firmware.*fail|Direct firmware load.*fail|nvram.*fail|invalid|timeout)' && FW_ERRS=1
+}
+
+# D7. Captive portal. A hardened DNS stack actively HIDES one: connectivity
+#     checking off + ignore-auto-dns + pinned DoT + random MAC = no detection,
+#     no interception, no redirect, and authorisation that never sticks.
+PORTAL=0; PORTAL_BLIND=""
+detect_portal() {
+    PORTAL=0; PORTAL_BLIND=""
+    local arp=0 icmp=0
+    [ -n "$GW" ] && /usr/bin/timeout 8 $ARPING -c2 -w3 -I "${WIFI_IF:-lo}" "$GW" >/dev/null 2>&1 && arp=1
+    [ -n "$GW" ] && /usr/bin/timeout 8 $PING -c2 -W2 -n "$GW" >/dev/null 2>&1 && icmp=1
+    # ARP answers but ICMP does not => L2 healthy, router withholding IP service.
+    [ "$arp" -eq 1 ] && [ "$icmp" -eq 0 ] && PORTAL=1
+    $GREP -rqE '^\s*interval\s*=\s*0' /etc/NetworkManager/conf.d/ 2>/dev/null \
+        && PORTAL_BLIND="$PORTAL_BLIND|NM connectivity checking DISABLED (interval=0) — no portal detection, no login prompt"
+    $GREP -rqE '^\s*ipv4\.ignore-auto-dns\s*=\s*true' /etc/NetworkManager/conf.d/ 2>/dev/null \
+        && PORTAL_BLIND="$PORTAL_BLIND|ipv4.ignore-auto-dns=true — the network's DNS (and its interception) is discarded"
+    $GREP -qiE '^DNSOverTLS=(yes|opportunistic)' "$RESOLVED_CONF" 2>/dev/null \
+        && PORTAL_BLIND="$PORTAL_BLIND|DNSOverTLS on — encrypted DNS a portal cannot intercept"
+    $GREP -rqE '^\s*wifi\.cloned-mac-address\s*=\s*random' /etc/NetworkManager/conf.d/ 2>/dev/null \
+        && PORTAL_BLIND="$PORTAL_BLIND|cloned-mac-address=random — every reconnect is a new client, portal auth never sticks"
+    PORTAL_BLIND="${PORTAL_BLIND#|}"
+}
+
+# D8. Is the durable WARP guard installed?
+detect_guard() {
+    [ -f "$WARP_CONF" ] && $GREP -q "interface-name:$WARP_IF" "$WARP_CONF" 2>/dev/null
+}
+
+run_all_detectors() {
+    discover
+    detect_blackhole; detect_poison_profiles; detect_shadow_profiles
+    detect_fw_lockout; detect_killswitch; detect_brcmfmac; detect_portal
+}
+
+# ===========================================================================
+# REPORT
+# ===========================================================================
+report() {
+    hdr "host"
+    echo "  $(/usr/bin/uname -n)   kernel $(/usr/bin/uname -r)   $(/usr/bin/uname -m)"
+    [ -r /sys/firmware/devicetree/base/model ] && \
+        echo "  model: $(/usr/bin/tr -d '\0' < /sys/firmware/devicetree/base/model)"
+    echo "  wifi: ${WIFI_IF:-<none>}   ssid: ${SSID:-<not associated>}   gw: ${GW:-<none>}"
+
+    hdr "connectivity ladder"
+    ladder_line; verdict
+
+    hdr "route blackhole  (routes into a DOWN device)"
+    if [ "$BLACKHOLE_N" -gt 0 ]; then
+        bad "$BLACKHOLE_N route(s) point into down interface(s): $BLACKHOLE_DEVS"
+        echo "       These outrank 'default via ${GW:-?}' and swallow all internet traffic"
+        echo "       while the LAN keeps working. This is the 2026-08-13 failure mode."
+        $IP -4 route show 2>/dev/null | $GREP 'linkdown' | /usr/bin/head -5 | $SED 's/^/       /'
+        [ "$BLACKHOLE_N" -gt 5 ] && echo "       ... and $((BLACKHOLE_N - 5)) more"
+    else
+        ok "no routes point into a downed interface"
+    fi
+
+    hdr "NM-persisted tunnel profiles  (THE root cause)"
+    if [ -n "$POISON_PROFILES" ]; then
+        local e f n
+        for e in $POISON_PROFILES; do
+            f="${e%:*}"; n="${e##*:}"
+            bad "$(/usr/bin/basename "$f") carries $n STATIC routes"
+            echo "       autoconnect=$($GREP -E '^autoconnect=' "$f" | /usr/bin/cut -d= -f2 || echo '<unset=yes>')"
+        done
+        echo "       A VPN profile never needs static routes — its daemon installs them at"
+        echo "       connect time. Their presence means NM adopted an external tun and then"
+        echo "       something ran 'nmcli con mod' on it, persisting it to disk with"
+        echo "       autoconnect. NM will now rebuild the blackhole after every reboot."
+        echo "       Fix: netmaster fix   (or: netmaster harden)"
+    else
+        ok "no NM profile persists a tunnel's route set"
+    fi
+
+    hdr "durable WARP guard"
+    if detect_guard; then
+        ok "$WARP_IF is marked unmanaged — NM can never persist a profile for it"
+    else
+        bad "$WARP_IF is NOT marked unmanaged — the outage can recur. Fix: netmaster harden"
+    fi
+
+    hdr "initrd-generated NM profiles"
+    if [ -n "$SHADOW_PROFILES" ]; then
+        bad "runtime profile(s) in /run shadowing your real profile:"
+        /usr/bin/printf '       %s\n' $SHADOW_PROFILES
+    else
+        ok "none (NM's own volatile profiles correctly ignored)"
+    fi
+
+    hdr "firewalld"
+    if $SCTL is-active --quiet firewalld 2>/dev/null; then
+        info "default zone: $($FW --get-default-zone 2>/dev/null)"
+        $FW --get-active-zones 2>/dev/null | $SED 's/^/       /'
+        if [ -n "$FW_LOCKOUT" ]; then
+            bad "default zone is 'drop' and these profiles have NO explicit zone — they inherit DROP:"
+            local e; for e in $FW_LOCKOUT; do echo "       ${e#*|}  (${e%%|*})"; done
+            echo "       That is the drop-zone lockout. Fix: netmaster fix"
+        else
+            ok "every wired/wireless profile is explicitly pinned"
+        fi
+        [ "$L3" -eq 0 ] && warn "firewalld is active AND upstream is dead — test with: $SCTL stop firewalld"
+    else
+        ok "firewalld inactive"
+    fi
+
+    hdr "DNS"
+    $RESOLVECTL status 2>/dev/null | /usr/bin/head -7 | $SED 's/^/       /'
+    info "resolved.conf: immutable=$KS_IMMUTABLE  killswitch=$([ $KS_KILLED -eq 1 ] && echo killed || echo armed)  relock_pending=$KS_RELOCK"
+    if [ "$KS_KILLED" -eq 1 ] && [ "$KS_IMMUTABLE" -eq 1 ]; then
+        bad "killswitch is 'killed' but resolved.conf is STILL immutable — the DNS swap failed with EPERM"
+        echo "       and your hardened DoT config is silently still live. Fix: netmaster fix"
+    fi
+    [ "$KS_KILLED" -eq 0 ] && [ "$KS_RELOCK" -eq 1 ] && \
+        bad "orphaned relock marker with no backup — killswitch state machine is inconsistent"
+    if $GREP -qiE '^DNSOverTLS=yes' "$RESOLVED_CONF" 2>/dev/null && [ "$DNS" -eq 0 ]; then
+        bad "DNSOverTLS=yes is pinned and DNS is failing — strict DoT has NO plaintext fallback"
+    fi
+
+    hdr "Wi-Fi radio"
+    $RFKILL list 2>/dev/null | $SED 's/^/       /'
+    [ -n "$WIFI_IF" ] && $IW dev "$WIFI_IF" link 2>/dev/null | $SED 's/^/       /'
+    if [ "$FW_ERRS" -eq 1 ]; then
+        bad "brcmfmac firmware/NVRAM errors in dmesg — Asahi per-machine vendor firmware may not have loaded."
+        echo "       Associates and gets DHCP, but real throughput is broken. See: netmaster wifi"
+    else
+        ok "no brcmfmac firmware load failures"
+    fi
+
+    hdr "captive portal"
+    # The ARP-yes/ICMP-no signature is only meaningful when we are actually
+    # offline. Plenty of APs — every motel/hotel one with client isolation —
+    # answer ARP and drop ICMP to the gateway while routing the internet fine.
+    # Flagging that as a portal while traffic flows is a false positive.
+    if [ "$PORTAL" -eq 1 ] && ! online; then
+        bad "gateway answers ARP but refuses ICMP — layer 2 is healthy and the router is"
+        echo "       withholding IP service. Captive portal, or your MAC is not permitted."
+        echo "       SSID '${SSID:-?}' — if this is guest/hotel/motel Wi-Fi: netmaster portal"
+    elif [ "$PORTAL" -eq 1 ]; then
+        ok "gateway drops ICMP but the internet routes fine — AP client isolation, benign"
+    else
+        ok "no captive-portal signature"
+    fi
+    if [ -n "$PORTAL_BLIND" ] && [ "$L3" -eq 0 ]; then
+        bad "PORTAL-BLIND STACK — your hardening prevents you from ever SEEING a portal:"
+        echo "$PORTAL_BLIND" | /usr/bin/tr '|' '\n' | $SED 's/^/       - /'
+        echo "       Fix: netmaster portal"
+    fi
+
+    hdr "WARP"
+    info "warp-svc: $($SCTL is-active warp-svc 2>&1) / $($SCTL is-enabled warp-svc 2>&1)"
+    /usr/bin/timeout 10 /usr/bin/warp-cli --accept-tos status 2>&1 | /usr/bin/head -3 | $SED 's/^/       /'
+    if $IP link show "$WARP_IF" >/dev/null 2>&1; then
+        local st; st=$($IP -br link show "$WARP_IF" | $AWK '{print $2}')
+        info "$WARP_IF present, state $st"
+        if ! $SCTL is-active --quiet warp-svc 2>/dev/null; then
+            bad "$WARP_IF exists but warp-svc is DOWN — stale interface. Fix: netmaster fix"
+        fi
+    else
+        info "$WARP_IF absent"
+    fi
+    $NFT list tables 2>/dev/null | $GREP -q cloudflare-warp && {
+        $SCTL is-active --quiet warp-svc 2>/dev/null \
+            || bad "stale 'inet cloudflare-warp' nft table while warp-svc is down. Fix: netmaster fix"
+    }
+}
+
+# ===========================================================================
+# FIXERS — each returns 0 if it changed something, 1 if there was nothing to do.
+# ===========================================================================
+
+# R1. Kill routes into down devices. Deleting the DEVICE removes every route
+#     bound to it atomically — that is why this beats any route-by-route loop.
+fix_blackhole() {
+    detect_blackhole
+    [ "$BLACKHOLE_N" -gt 0 ] || return 1
+    step "R1  route blackhole: $BLACKHOLE_N route(s) via $BLACKHOLE_DEVS"
+    local dev
+    for dev in $BLACKHOLE_DEVS; do
+        [ "$dev" = lo ] && continue
+        [ "$dev" = "${WIFI_IF:-}" ] && { warn "refusing to delete the Wi-Fi device $dev"; continue; }
+        [ "$DRY" -eq 0 ] && { $MKDIR -p "$BAKDIR"; $IP -4 route show 2>/dev/null | $GREP " dev $dev" > "$BAKDIR/routes-$dev.txt"; }
+        # Flush BY DEVICE. Never feed route lines to `ip route del` — they end in
+        # the output-only status flag `linkdown`, so every delete silently fails.
+        act "flush v4 routes on $dev" "" $IP -4 route flush dev "$dev"
+        act "flush v6 routes on $dev" "" $IP -6 route flush dev "$dev"
+        act "delete interface $dev"   "" $IP link del "$dev"
+    done
+    return 0
+}
+
+# R2. THE root cause. Remove NM profiles that persist a tunnel's route set, and
+#     install the unmanaged guard so one can never be created again.
+fix_poison_profiles() {
+    detect_poison_profiles
+    local did=1
+    if [ -n "$POISON_PROFILES" ]; then
+        step "R2  NM-persisted tunnel profiles"
+        local e f id
+        for e in $POISON_PROFILES; do
+            f="${e%:*}"
+            id=$($GREP -m1 -E '^id=' "$f" | /usr/bin/cut -d= -f2)
+            id="${id:-$(/usr/bin/basename "$f" .nmconnection)}"
+            backup_file "$f"
+            act "disable autoconnect on '$id'" "" $NM con mod "$id" connection.autoconnect no
+            act "deactivate '$id'"             "" $NM con down "$id"
+            act "delete profile '$id'"         "" $NM con delete "$id"
+            [ -f "$f" ] && act "remove $f" "" $RM -f "$f"
+        done
+        act "reload NM connections" "" $NM connection reload
+        did=0
+    fi
+    # The guard is the part that makes it permanent.
+    if ! detect_guard; then
+        step "R2b install the durable unmanaged guard"
+        install_guard && did=0
+    fi
+    return $did
+}
+
+install_guard() {
+    if [ "$DRY" -eq 1 ]; then
+        echo "  ${C_Y}would:${C_0} write $WARP_CONF marking $WARP_IF unmanaged"
+        return 0
+    fi
+    backup_file "$WARP_CONF"
+    $CAT > "$WARP_CONF" <<EOF
+# Installed by netmaster. Cloudflare WARP's tun must NEVER be managed by NM.
+#
+# NM adopts the externally-created $WARP_IF device as an "external" connection.
+# Any \`nmcli con mod\` against that ephemeral profile — e.g. asahi-drop-zone's
+# install.sh setting connection.zone=drop on tunnel profiles — PERSISTS it to
+# /etc/NetworkManager/system-connections/ with autoconnect=yes and WARP's whole
+# split-tunnel route set frozen in as static ipv4.routeN= entries. NM then
+# rebuilds that blackhole on every network change, with warp-svc dead, forever.
+#
+# Unmanaged => no profile is ever created => it can never be persisted.
+# Firewall posture is unchanged: with no NM zone binding the interface falls
+# through to firewalld's default zone.
+[keyfile]
+unmanaged-devices=interface-name:$WARP_IF
+EOF
+    echo "$RM -f '$WARP_CONF'" >> "$UNDO"
+    echo "  ${C_G}did:${C_0}   wrote $WARP_CONF ($WARP_IF unmanaged)"
+    $NM general reload conf 2>/dev/null
+    return 0
+}
+
+# R3. Remove initrd-generated shadow profiles.
+fix_shadow_profiles() {
+    detect_shadow_profiles
+    [ -n "$SHADOW_PROFILES" ] || return 1
+    step "R3  initrd-generated shadow NM profiles"
+    local f
+    for f in $SHADOW_PROFILES; do
+        backup_file "$f"
+        act "remove shadow profile $(/usr/bin/basename "$f")" "" $RM -f "$f"
+    done
+    act "reload NM connections" "" $NM connection reload
+    return 0
+}
+
+# R4. Stale WARP artifacts left behind while the daemon is down.
+fix_stale_warp() {
+    $SCTL is-active --quiet warp-svc 2>/dev/null && return 1
+    local did=1
+    if $NFT list tables 2>/dev/null | $GREP -q cloudflare-warp; then
+        step "R4  stale WARP artifacts"
+        act "delete nft table inet cloudflare-warp" "" $NFT delete table inet cloudflare-warp
+        did=0
+    fi
+    if $IP link show "$WARP_IF" >/dev/null 2>&1; then
+        [ "$did" -eq 1 ] && step "R4  stale WARP artifacts"
+        # A .socket unit would re-activate the daemon and rebuild everything.
+        act "stop warp-svc.socket" "" $SCTL stop warp-svc.socket
+        act "flush v4 routes on $WARP_IF" "" $IP -4 route flush dev "$WARP_IF"
+        act "flush v6 routes on $WARP_IF" "" $IP -6 route flush dev "$WARP_IF"
+        act "delete stale $WARP_IF"       "" $IP link del "$WARP_IF"
+        did=0
+    fi
+    return $did
+}
+
+# R5. firewalld drop-zone lockout: pin every unpinned NIC.
+fix_fw_lockout() {
+    detect_fw_lockout
+    [ -n "$FW_LOCKOUT" ] || return 1
+    step "R5  firewalld drop-zone lockout"
+    local target=FedoraWorkstation
+    $FW --get-zones 2>/dev/null | /usr/bin/tr ' ' '\n' | $GREP -qx "$target" || target=home
+    local e uuid name
+    for e in $FW_LOCKOUT; do
+        uuid="${e%%|*}"; name="${e#*|}"
+        act "pin '$name' -> $target" "$NM con mod uuid $uuid connection.zone ''" \
+            $NM con mod uuid "$uuid" connection.zone "$target"
+    done
+    [ -n "$WIFI_IF" ] && act "apply to live $WIFI_IF now" "" $FW --zone="$target" --change-interface="$WIFI_IF"
+    return 0
+}
+
+# R6. killswitch immutability deadlock.
+fix_killswitch_state() {
+    detect_killswitch
+    local did=1
+    if [ "$KS_KILLED" -eq 1 ] && [ "$KS_IMMUTABLE" -eq 1 ]; then
+        step "R6  killswitch is 'killed' but resolved.conf is immutable (writes are EPERM)"
+        backup_file "$RESOLVED_CONF"
+        act "drop the immutable flag on resolved.conf" "$CHATTR +i $RESOLVED_CONF" \
+            $CHATTR -i "$RESOLVED_CONF"
+        [ "$DRY" -eq 0 ] && : > "$RESOLVED_CONF.warpkill-relock"
+        info "re-run 'warp-killswitch down' to actually write the plain-DNS config"
+        did=0
+    fi
+    if [ "$KS_KILLED" -eq 0 ] && [ "$KS_RELOCK" -eq 1 ]; then
+        step "R6b orphaned relock marker"
+        act "remove orphaned relock marker" "" $RM -f "$RESOLVED_CONF.warpkill-relock"
+        did=0
+    fi
+    return $did
+}
+
+# R7. Bounce the stack. Cheap, and it is what makes NM re-read everything above.
+fix_bounce() {
+    step "R7  restart the network stack"
+    act "restart systemd-resolved" "" $SCTL restart systemd-resolved
+    act "restart NetworkManager"   "" $SCTL restart NetworkManager
+    [ "$DRY" -eq 0 ] && /usr/bin/sleep 5
+    return 0
+}
+
+# R8. Wi-Fi driver reload. Last resort — it drops the association.
+fix_wifi_driver() {
+    step "R8  reload the Wi-Fi driver (this WILL drop the association)"
+    confirm "  reload brcmfmac?" || return 1
+    act "unblock rfkill"        "" $RFKILL unblock wifi
+    act "remove brcmfmac"       "" /usr/sbin/modprobe -r brcmfmac
+    [ "$DRY" -eq 0 ] && /usr/bin/sleep 2
+    act "load brcmfmac"         "" /usr/sbin/modprobe brcmfmac
+    [ "$DRY" -eq 0 ] && /usr/bin/sleep 6
+    act "restart NetworkManager" "" $SCTL restart NetworkManager
+    [ "$DRY" -eq 0 ] && /usr/bin/sleep 6
+    return 0
+}
+
+# ===========================================================================
+# COMMANDS
+# ===========================================================================
+
+cmd_diagnose() {
+    hdr "netmaster diagnose — $STAMP  (read-only)"
+    run_all_detectors; ladder; report
+    echo
+    hdr "verdict"
+    if [ "$FLAGS" -eq 0 ]; then
+        ok "no faults found."
+    else
+        echo "  $FLAGS flag(s). Repair with: ${C_B}netmaster fix${C_0}   (preview: netmaster fix --dry-run)"
+    fi
+    echo "  log: $LOG"
+}
+
+cmd_status() {
+    discover; ladder
+    hdr "netmaster status"
+    echo "  ssid       ${SSID:-<not associated>}   iface ${WIFI_IF:-<none>}   gw ${GW:-<none>}"
+    ladder_line
+    echo "  warp-svc   $($SCTL is-active warp-svc 2>&1) / $($SCTL is-enabled warp-svc 2>&1)"
+    echo "  warp       $(/usr/bin/timeout 10 /usr/bin/warp-cli --accept-tos status 2>&1 | /usr/bin/head -1)"
+    local tr; tr=$(/usr/bin/timeout 12 $CURL -s --max-time 10 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | $GREP -E '^(warp|ip|loc|colo)=' | /usr/bin/tr '\n' ' ')
+    echo "  egress     ${tr:-<unreachable>}"
+    local def d z fwline=""
+    def=$($FW --get-default-zone 2>/dev/null)
+    for d in ${WIFI_IF:-} "$WARP_IF"; do
+        [ -n "$d" ] || continue
+        $IP link show "$d" >/dev/null 2>&1 || continue
+        z=$($FW --get-zone-of-interface="$d" 2>/dev/null)
+        # "no zone" is not a gap: an unbound interface falls through to the
+        # default zone. Show what it actually lands in, not the literal answer.
+        case "$z" in ""|"no zone") z="$def(default)" ;; esac
+        fwline="$fwline $d=$z"
+    done
+    echo "  firewall   default=$def $fwline"
+    echo "  dns        $($RESOLVECTL status 2>/dev/null | $AWK -F': ' '/DNS Servers|Current DNS Server/{print $2; exit}')"
+    echo "  dns-proto  $($RESOLVECTL status 2>/dev/null | $AWK -F': ' '/Protocols/{print $2; exit}')"
+    echo "  killswitch $([ -x "$KILLSWITCH" ] && $KILLSWITCH state 2>/dev/null || echo '<not installed>')"
+    detect_guard && echo "  guard      ${C_G}installed${C_0} ($WARP_IF unmanaged)" \
+                 || echo "  guard      ${C_R}MISSING${C_0} — run: netmaster harden"
+    detect_blackhole
+    [ "$BLACKHOLE_N" -gt 0 ] && echo "  ${C_R}blackhole  $BLACKHOLE_N routes via $BLACKHOLE_DEVS${C_0}" \
+                             || echo "  blackhole  none"
+}
+
+cmd_fix() {
+    hdr "netmaster fix — $STAMP$([ $DRY -eq 1 ] && echo '  (DRY RUN)')"
+    echo "  Escalating ladder. Verified after every rung; stops the moment internet returns."
+    echo "  Undo journal: $UNDO"
+    run_all_detectors; ladder; ladder_line
+
+    if online && [ "$DNS" -eq 1 ] && [ "$BLACKHOLE_N" -eq 0 ] && [ -z "$POISON_PROFILES" ]; then
+        ok "already online with a clean route table and no persisted tunnel profile."
+        detect_guard || { echo; info "installing the durable guard anyway so this cannot recur:"; install_guard; }
+        return 0
+    fi
+
+    local rung
+    for rung in fix_blackhole fix_poison_profiles fix_shadow_profiles fix_stale_warp \
+                fix_fw_lockout fix_killswitch_state fix_bounce fix_wifi_driver; do
+        if $rung; then
+            [ "$DRY" -eq 1 ] && continue
+            discover; ladder; ladder_line
+            if online; then
+                if [ "$DNS" -eq 1 ]; then
+                    echo; ok "INTERNET IS BACK (fixed at: $rung)"
+                    cmd_verify_tail; return 0
+                fi
+                info "IP is up but DNS is not — continuing down the ladder for the resolver."
+            fi
+        fi
+    done
+
+    discover; ladder
+    echo; hdr "result"
+    if online; then
+        ok "IP connectivity restored."
+        [ "$DNS" -eq 0 ] && bad "DNS still failing. Try: netmaster portal   (drops DoT for a captive portal)"
+    else
+        bad "still no internet after the full ladder."
+        echo "  The route table is clean and stable, which makes this the first trustworthy"
+        echo "  negative result — the cause is upstream of this host, or a captive portal."
+        echo "  Next: netmaster portal    then log in at http://${GW:-<gw>}/"
+        echo "        netmaster panic     strips everything to plain DHCP + plain DNS"
+    fi
+    cmd_verify_tail
+}
+
+cmd_verify_tail() {
+    echo
+    hdr "post-fix verification"
+    ladder_line
+    $IP -4 route show 2>/dev/null | $SED 's/^/       /'
+    echo "  undo this change set with: netmaster undo"
+    echo "  log: $LOG"
+}
+
+cmd_harden() {
+    hdr "netmaster harden$([ $DRY -eq 1 ] && echo '  (DRY RUN)')"
+    echo "  Installs the guards that stop the 2026-08-13 outage recurring. Idempotent."
+    discover
+
+    step "H1  mark $WARP_IF unmanaged by NetworkManager"
+    if detect_guard; then ok "already installed"; else install_guard; fi
+
+    step "H2  remove any NM profile that persists a tunnel's route set"
+    detect_poison_profiles
+    if [ -z "$POISON_PROFILES" ]; then ok "none present"; else fix_poison_profiles; fi
+
+    step "H3  pin every wired/wireless profile to an explicit firewalld zone"
+    detect_fw_lockout
+    if [ -z "$FW_LOCKOUT" ]; then ok "all pinned"; else fix_fw_lockout; fi
+
+    step "H4  patch asahi-drop-zone install.sh — it is what caused the outage"
+    local dz found=0
+    for dz in $(sibling asahi-drop-zone/install.sh); do
+        [ -f "$dz" ] || continue
+        found=1; patch_dropzone "$dz"
+    done
+    [ "$found" -eq 0 ] && ok "asahi-drop-zone not present on this system"
+
+    step "H5  verify"
+    ladder; ladder_line
+    detect_guard && ok "guard active" || bad "guard NOT active"
+    echo "  log: $LOG"
+}
+
+# patch_dropzone <path/to/install.sh>
+#
+# asahi-drop-zone pins tunnel profiles with:
+#     nmcli con mod uuid <VPN_UUID> connection.zone drop
+#
+# For a real, on-disk VPN profile that is fine. For Cloudflare WARP's tun it is
+# catastrophic: NM only holds that connection in memory (it ADOPTED an
+# externally-created device), and `con mod` forces it to disk — autoconnect=yes
+# plus ~314 static routes. That file then rebuilds the blackhole forever.
+#
+# The patch makes the loop skip any tunnel profile whose keyfile is not already
+# under /etc. Those are ephemeral, and pinning them is not just unnecessary but
+# actively harmful — an unpinned interface already falls through to the default
+# zone, which after this script runs IS `drop`. Same posture, no persistence.
+PATCH_MARK='# netmaster: do not persist external tun profiles'
+patch_dropzone() {
+    local dz="$1"
+    if $GREP -q "$PATCH_MARK" "$dz" 2>/dev/null; then
+        ok "already patched: $dz"
+        return 0
+    fi
+    if ! $GREP -q 'pinning tunnel profiles to' "$dz" 2>/dev/null; then
+        warn "unrecognised layout, not patching: $dz"
+        return 1
+    fi
+    if [ "$DRY" -eq 1 ]; then
+        echo "  ${C_Y}would:${C_0} patch $dz to skip ephemeral tun profiles"
+        return 0
+    fi
+
+    backup_file "$dz"
+    local tmp; tmp=$(/usr/bin/mktemp)
+    /usr/bin/awk -v mark="$PATCH_MARK" '
+      /info "pinning tunnel profiles to/ { inblk=1; print; print "  " mark
+        print "  # Pinning an ADOPTED external tun (Cloudflare WARP) persists NM'"'"'s"
+        print "  # in-memory profile to /etc with autoconnect + its whole static route"
+        print "  # set, which blackholes the internet on every later boot. Skip those:"
+        print "  # unpinned interfaces already inherit the default zone, now `drop`."
+        next }
+      inblk && /\$NM con mod uuid "\$\{VPN_UUIDS\[\$i\]\}" connection\.zone/ {
+        print "    _kf=\"$($NM -g connection.filename con show uuid \"${VPN_UUIDS[$i]}\" 2>/dev/null)\""
+        print "    case \"$_kf\" in"
+        print "      /etc/*) ;;   # a real on-disk VPN profile — safe to pin"
+        print "      *) printf '"'"'    skipped %-30s (ephemeral: %s) -- inherits default zone\\n'"'"' \\"
+        print "           \"${VPN_NAMES[$i]}\" \"${_kf:-in-memory}\"; continue ;;"
+        print "    esac"
+        print; next }
+      inblk && /^fi$/ { inblk=0 }
+      { print }
+    ' "$dz" > "$tmp"
+
+    if ! /usr/bin/bash -n "$tmp" 2>/dev/null; then
+        $RM -f "$tmp"
+        bad "patched $dz fails 'bash -n' — left untouched"
+        return 1
+    fi
+    if ! $GREP -q "$PATCH_MARK" "$tmp"; then
+        $RM -f "$tmp"
+        warn "patch did not apply cleanly, left untouched: $dz"
+        return 1
+    fi
+    $CAT "$tmp" > "$dz"; $RM -f "$tmp"
+    echo "$RM -f '$dz'" >/dev/null   # undo comes from backup_file's restore line
+    echo "  ${C_G}did:${C_0}   patched $dz (skips ephemeral tun profiles)"
+    return 0
+}
+
+cmd_portal() {
+    hdr "netmaster portal — captive-portal mode$([ $DRY -eq 1 ] && echo '  (DRY RUN)')"
+    echo "  Makes a captive portal VISIBLE and its authorisation STICK:"
+    echo "    WARP off · plain unencrypted DNS · stable MAC · accept the network's DNS"
+    echo "  Reverse with: netmaster restore"
+    confirm "  proceed?" || return 1
+    discover
+
+    step "P1  WARP down"
+    [ -x "$KILLSWITCH" ] && act "warp-killswitch down" "" $KILLSWITCH down \
+        || { act "stop warp-svc" "" $SCTL stop warp-svc; act "disable warp-svc" "" $SCTL disable warp-svc; }
+    fix_stale_warp
+
+    step "P2  stable MAC (a random MAC means the portal never remembers you)"
+    if [ -n "$SSID" ]; then
+        local uuid
+        uuid=$($NM -t -f UUID,NAME con show --active 2>/dev/null | $AWK -F: -v s="$SSID" '$2==s{print $1; exit}')
+        [ -n "$uuid" ] && act "pin '$SSID' to its permanent MAC" \
+            "$NM con mod uuid $uuid wifi.cloned-mac-address random" \
+            $NM con mod uuid "$uuid" wifi.cloned-mac-address permanent
+        [ -n "$uuid" ] && act "accept the network's DNS on '$SSID'" \
+            "$NM con mod uuid $uuid ipv4.ignore-auto-dns yes" \
+            $NM con mod uuid "$uuid" ipv4.ignore-auto-dns no
+    fi
+
+    step "P3  re-enable NM connectivity checking so the portal is detected"
+    if [ -f /etc/NetworkManager/conf.d/20-connectivity-disable.conf ]; then
+        backup_file /etc/NetworkManager/conf.d/20-connectivity-disable.conf
+        act "disable the connectivity-check killer" "" \
+            /usr/bin/mv /etc/NetworkManager/conf.d/20-connectivity-disable.conf \
+                        /etc/NetworkManager/conf.d/20-connectivity-disable.conf.netmaster-off
+    fi
+
+    step "P4  reconnect"
+    act "restart NetworkManager" "" $SCTL restart NetworkManager
+    [ "$DRY" -eq 0 ] && /usr/bin/sleep 6
+    discover; ladder; ladder_line
+
+    echo
+    hdr "now log in"
+    echo "  Open a browser to:  http://${GW:-<gateway>}/"
+    echo "  or force the redirect:  $CURL -v http://connectivitycheck.gstatic.com/generate_204"
+    /usr/bin/timeout 10 $CURL -sS -m6 -o /dev/null \
+        -w '  gateway http: %{http_code}  redirect=%{redirect_url}\n' "http://${GW:-127.0.0.1}/" 2>/dev/null
+    echo "  When you are through:  netmaster restore"
+}
+
+cmd_panic() {
+    hdr "netmaster panic$([ $DRY -eq 1 ] && echo '  (DRY RUN)')"
+    echo "  NUCLEAR. Strips every overlay back to plain DHCP + plain unencrypted DNS:"
+    echo "    kill all tunnels · flush their routes · drop WARP's nft table"
+    echo "    plain 1.1.1.1 DNS, DoT and DNSSEC off · firewalld default zone"
+    echo "  The default route is NEVER removed. Reverse with: netmaster restore"
+    confirm "  proceed?" || return 1
+    discover
+
+    step "N1  tear down every tunnel device"
+    local d
+    for d in $($IP -o link show 2>/dev/null | $AWK -F': ' '{print $2}' | $GREP -vE '^(lo|'"${WIFI_IF:-__none__}"')$'); do
+        $IP -d link show "$d" 2>/dev/null | $GREP -qE 'tun|tap|wireguard|vti|gre' || continue
+        act "flush v4 routes on $d" "" $IP -4 route flush dev "$d"
+        act "flush v6 routes on $d" "" $IP -6 route flush dev "$d"
+        act "delete $d"             "" $IP link del "$d"
+    done
+
+    step "N2  WARP off"
+    act "stop warp-svc.socket" "" $SCTL stop warp-svc.socket
+    act "stop warp-svc"        "" $SCTL stop warp-svc
+    act "disable warp-svc"     "$SCTL enable warp-svc" $SCTL disable warp-svc
+    $NFT list tables 2>/dev/null | $GREP -q cloudflare-warp && \
+        act "delete nft table inet cloudflare-warp" "" $NFT delete table inet cloudflare-warp
+
+    step "N3  drop orphaned policy-routing rules"
+    local p
+    for p in $($IP rule show 2>/dev/null | $GREP -E 'lookup (65743|[0-9]{5,})' | $GREP -oE '^[0-9]+'); do
+        [ "$p" = 0 ] && continue
+        [ "$p" = 32766 ] && continue
+        [ "$p" = 32767 ] && continue
+        act "delete ip rule priority $p" "" $IP rule del priority "$p"
+    done
+
+    step "N4  plain DNS"
+    detect_killswitch
+    [ "$KS_IMMUTABLE" -eq 1 ] && act "unlock resolved.conf" "$CHATTR +i $RESOLVED_CONF" $CHATTR -i "$RESOLVED_CONF"
+    backup_file "$RESOLVED_CONF"
+    if [ "$DRY" -eq 0 ]; then
+        [ -f "$RESOLVED_CONF.warpkill-bak" ] || $CP -a "$RESOLVED_CONF" "$RESOLVED_CONF.warpkill-bak"
+        $CAT > "$RESOLVED_CONF" <<'EOF'
+# netmaster panic mode. Plain unencrypted DNS, no DoT, no DNSSEC.
+# The real config is at /etc/systemd/resolved.conf.warpkill-bak.
+# Restore with: netmaster restore
+[Resolve]
+DNS=1.1.1.1 9.9.9.9
+FallbackDNS=8.8.8.8
+DNSOverTLS=no
+DNSSEC=no
+MulticastDNS=no
+LLMNR=no
+EOF
+        echo "  ${C_G}did:${C_0}   wrote plain-DNS resolved.conf"
+    else
+        echo "  ${C_Y}would:${C_0} write plain-DNS resolved.conf"
+    fi
+
+    step "N5  firewalld — widen the live NIC's zone"
+    # A `drop` zone cannot actually cause an outage: firewalld accepts
+    # established/related in filter_INPUT *before* zone dispatch, so all
+    # outbound replies land regardless. Only inbound and stateful DHCPv6 are
+    # affected. So this is a belt-and-braces rung — and because it overrides a
+    # deliberate posture choice, it records what it changed so `restore` and
+    # `undo` can both put it back exactly.
+    if $SCTL is-active --quiet firewalld 2>/dev/null && [ -n "$WIFI_IF" ]; then
+        local prev_zone prev_uuid
+        prev_zone=$($FW --get-zone-of-interface="$WIFI_IF" 2>/dev/null)
+        prev_uuid=$($NM -t -f UUID,DEVICE con show --active 2>/dev/null | $AWK -F: -v d="$WIFI_IF" '$2==d{print $1; exit}')
+        if [ "$DRY" -eq 0 ] && [ -n "$prev_uuid" ]; then
+            /usr/bin/printf '%s\t%s\t%s\n' "$prev_uuid" "$WIFI_IF" \
+                "$($NM -g connection.zone con show uuid "$prev_uuid" 2>/dev/null)" \
+                > "$STATE_DIR/panic-zone.tsv"
+        fi
+        act "widen $WIFI_IF: $prev_zone -> FedoraWorkstation" \
+            "$FW --zone='${prev_zone:-drop}' --change-interface='$WIFI_IF'" \
+            $FW --zone=FedoraWorkstation --change-interface="$WIFI_IF"
+    fi
+
+    step "N6  bounce"
+    act "restart systemd-resolved" "" $SCTL restart systemd-resolved
+    act "restart NetworkManager"   "" $SCTL restart NetworkManager
+    [ "$DRY" -eq 0 ] && /usr/bin/sleep 6
+
+    discover; ladder; ladder_line; verdict
+    echo "  reverse with: netmaster restore"
+    echo "  log: $LOG"
+}
+
+cmd_restore() {
+    hdr "netmaster restore — return to the hardened posture$([ $DRY -eq 1 ] && echo '  (DRY RUN)')"
+    discover
+
+    step "S1  restore DNS"
+    if [ -x "$KILLSWITCH" ] && [ "$($KILLSWITCH state 2>/dev/null)" = killed ]; then
+        act "warp-killswitch up (restores DNS verbatim + reconnects WARP)" "" $KILLSWITCH up
+    else
+        info "killswitch already armed"
+    fi
+
+    step "S2  re-enable NM connectivity-check drop-in if portal mode disabled it"
+    if [ -f /etc/NetworkManager/conf.d/20-connectivity-disable.conf.netmaster-off ]; then
+        act "restore the connectivity drop-in" "" \
+            /usr/bin/mv /etc/NetworkManager/conf.d/20-connectivity-disable.conf.netmaster-off \
+                        /etc/NetworkManager/conf.d/20-connectivity-disable.conf
+    else
+        info "nothing to restore"
+    fi
+
+    step "S3  put back the firewall zone panic mode widened"
+    if [ -f "$STATE_DIR/panic-zone.tsv" ]; then
+        local u dev z
+        IFS=$'\t' read -r u dev z < "$STATE_DIR/panic-zone.tsv"
+        if [ -n "$z" ]; then
+            act "re-pin '$dev' profile to zone '$z'" "" $NM con mod uuid "$u" connection.zone "$z"
+            act "apply '$z' to live $dev now"        "" $FW --zone="$z" --change-interface="$dev"
+        else
+            info "profile had no explicit zone before panic — leaving it to the default"
+        fi
+        [ "$DRY" -eq 0 ] && $RM -f "$STATE_DIR/panic-zone.tsv"
+    else
+        info "panic mode never widened a zone — nothing to put back"
+    fi
+
+    step "S4  re-apply the guards"
+    detect_guard || install_guard
+
+    step "S5  WARP on"
+    act "enable warp-svc" "" $SCTL enable warp-svc
+    act "start warp-svc"  "" $SCTL start warp-svc
+    [ "$DRY" -eq 0 ] && /usr/bin/sleep 4
+    act "warp-cli connect" "" /usr/bin/timeout 25 /usr/bin/warp-cli --accept-tos connect
+
+    step "S6  bounce + verify"
+    act "restart systemd-resolved" "" $SCTL restart systemd-resolved
+    [ "$DRY" -eq 0 ] && /usr/bin/sleep 4
+    discover; ladder; ladder_line
+    cmd_status
+}
+
+cmd_warp() {
+    local sub="${ARGS# }"; sub="${sub%% *}"; sub="${sub:-status}"
+    case "$sub" in
+      status)
+        hdr "WARP status"
+        echo "  warp-svc: $($SCTL is-active warp-svc 2>&1) / $($SCTL is-enabled warp-svc 2>&1)"
+        /usr/bin/timeout 12 /usr/bin/warp-cli --accept-tos status 2>&1 | $SED 's/^/  /'
+        /usr/bin/timeout 12 $CURL -s --max-time 10 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null \
+            | $GREP -E '^(warp|ip|loc|colo|gateway)=' | $SED 's/^/  /'
+        echo "  routes in MAIN via $WARP_IF: $($IP -4 route show 2>/dev/null | $GREP -c "dev $WARP_IF")  (must be 0)"
+        echo "  routes in table 65743:       $($IP route show table 65743 2>/dev/null | $GREP -c "dev $WARP_IF")  (normal when connected)"
+        echo "  NM manages the tun:          $($NM -t -f DEVICE,STATE device status 2>/dev/null | $AWK -F: -v i="$WARP_IF" '$1==i{print $2}' || echo '<absent>')  (must be 'unmanaged')"
+        detect_guard && ok "durable guard installed" || bad "durable guard MISSING — run: netmaster harden"
+        ;;
+      off)
+        hdr "WARP off"
+        confirm "  take WARP down?" || return 1
+        [ -x "$KILLSWITCH" ] && act "warp-killswitch down" "" $KILLSWITCH down || {
+            act "stop warp-svc.socket" "" $SCTL stop warp-svc.socket
+            act "stop warp-svc"        "" $SCTL stop warp-svc
+            act "disable warp-svc"     "" $SCTL disable warp-svc; }
+        fix_stale_warp
+        discover; ladder; ladder_line
+        ;;
+      on)
+        hdr "WARP on"
+        detect_guard || { info "installing the durable guard first — without it WARP's tun gets persisted by NM"; install_guard; }
+        [ -x "$KILLSWITCH" ] && [ "$($KILLSWITCH state 2>/dev/null)" = killed ] \
+            && act "warp-killswitch up" "" $KILLSWITCH up || {
+            act "enable warp-svc" "" $SCTL enable warp-svc
+            act "start warp-svc"  "" $SCTL start warp-svc
+            [ "$DRY" -eq 0 ] && /usr/bin/sleep 4
+            act "warp-cli connect" "" /usr/bin/timeout 25 /usr/bin/warp-cli --accept-tos connect; }
+        [ "$DRY" -eq 0 ] && /usr/bin/sleep 4
+        ARGS=status; cmd_warp
+        ;;
+      reset)
+        hdr "WARP reset — full teardown, guard, rebuild"
+        echo "  Registration in /var/lib/cloudflare-warp/reg.json is PRESERVED."
+        confirm "  proceed?" || return 1
+        act "stop warp-svc.socket" "" $SCTL stop warp-svc.socket
+        act "stop warp-svc"        "" $SCTL stop warp-svc
+        fix_poison_profiles || true
+        fix_stale_warp || true
+        detect_guard || install_guard
+        act "reload NM config"     "" $NM general reload conf
+        act "enable warp-svc"      "" $SCTL enable warp-svc
+        act "start warp-svc"       "" $SCTL start warp-svc
+        [ "$DRY" -eq 0 ] && /usr/bin/sleep 5
+        act "warp-cli connect"     "" /usr/bin/timeout 25 /usr/bin/warp-cli --accept-tos connect
+        [ "$DRY" -eq 0 ] && /usr/bin/sleep 4
+        ARGS=status; cmd_warp
+        ;;
+      *) echo "usage: netmaster warp {status|on|off|reset}" >&2; return 2 ;;
+    esac
+}
+
+cmd_wifi() {
+    hdr "netmaster wifi — deep radio / driver capture"
+    discover
+    echo "  iface ${WIFI_IF:-<none>}   ssid ${SSID:-<not associated>}"
+    hdr "association"
+    [ -n "$WIFI_IF" ] && $IW dev "$WIFI_IF" link 2>&1 | $SED 's/^/  /'
+    [ -n "$WIFI_IF" ] && $IW dev "$WIFI_IF" station dump 2>&1 | $GREP -E 'signal|tx bitrate|rx bitrate' | $SED 's/^/  /'
+    hdr "rfkill"; $RFKILL list 2>&1 | $SED 's/^/  /'
+    hdr "brcmfmac module"
+    /usr/sbin/lsmod 2>/dev/null | $GREP -iE 'brcmfmac|brcmutil|cfg80211|mac80211' | $SED 's/^/  /'
+    hdr "Asahi per-machine vendor firmware"
+    echo "  Asahi Wi-Fi needs NVRAM extracted from this Mac's own firmware partition."
+    echo "  Wrong calibration => associates, gets DHCP, LAN fine, throughput broken."
+    # Derive the chip from the driver itself rather than hardcoding a model list:
+    # M1 is BCM4377/4378, M1 Ultra 4387, M2/M3 4388, later parts will be new
+    # numbers again. Asking the driver keeps this correct on every Apple Silicon
+    # machine, including ones that did not exist when this was written.
+    local chip
+    chip=$(/usr/bin/journalctl -b -k --no-pager 2>/dev/null \
+           | $GREP -oE 'brcmfmac[0-9]+[a-z][0-9]?-pcie' | /usr/bin/head -1)
+    chip="${chip%%-pcie}"; chip="${chip#brcmfmac}"
+    # The per-machine files live in /lib/firmware/vendor/brcm — NOT
+    # /lib/firmware/brcm. asahi-fwextract pulls them off the Mac's own firmware
+    # partition at install time; they are keyed by Apple board codename
+    # (tokara, tasmania, sumatra, miyake, ...), not by model name.
+    local vdir=/lib/firmware/vendor/brcm
+    [ -d "$vdir" ] || vdir=/lib/firmware/brcm
+    if [ -n "$chip" ]; then
+        info "chip BCM${chip%%[a-z]*}  ·  firmware basename brcmfmac${chip}-pcie  ·  vendor dir $vdir"
+    else
+        warn "could not determine the Wi-Fi chip from the kernel log"
+        chip='43[0-9][0-9]'
+    fi
+    # Which board is THIS Mac? The authoritative answer is the device tree
+    # property `brcm,board-type` on the wifi node — every Asahi machine has it,
+    # and it is what brcmfmac builds the firmware filename from. It is the Apple
+    # WLAN board codename (tokara, canary, java, sumatra, ...), which is NOT the
+    # machine id: this box is `apple,j414c` in /compatible but `apple,tokara`
+    # here. Deriving it from /compatible would be wrong on every model.
+    local board bt
+    bt=$(/usr/bin/find /sys/firmware/devicetree/base -name 'brcm,board-type' 2>/dev/null \
+         | $GREP -i wifi | /usr/bin/head -1)
+    [ -z "$bt" ] && bt=$(/usr/bin/find /sys/firmware/devicetree/base -name 'brcm,board-type' 2>/dev/null | /usr/bin/head -1)
+    [ -n "$bt" ] && board=$(/usr/bin/tr -d '\0' < "$bt" 2>/dev/null)
+    local machine
+    machine=$(/usr/bin/tr '\0' '\n' < /sys/firmware/devicetree/base/compatible 2>/dev/null | /usr/bin/head -1)
+    info "machine: ${machine:-<unknown>}   WLAN board: ${board:-<unknown>}"
+    if [ -n "$board" ] && /usr/bin/ls "$vdir"/*"$board"* >/dev/null 2>&1; then
+        /usr/bin/ls -la "$vdir"/*"$board"* 2>/dev/null | $GREP -v brcmbt | $SED 's/^/  /'
+    else
+        # Fall back to every file for this chip; the .txt is the NVRAM that
+        # carries the per-machine calibration.
+        /usr/bin/ls -la "$vdir" 2>/dev/null | $GREP -E "$chip" | $GREP -v brcmbt \
+            | /usr/bin/head -15 | $SED 's/^/  /'
+        [ -n "$board" ] && warn "no vendor firmware matching board '$board' — Wi-Fi may run on wrong calibration"
+    fi
+    hdr "firmware load messages"
+    /usr/bin/journalctl -b -k --no-pager 2>/dev/null \
+        | $GREP -iE 'brcmfmac|firmware fail|direct firmware load|nvram' | /usr/bin/tail -30 | $SED 's/^/  /'
+    detect_brcmfmac
+    [ "$FW_ERRS" -eq 1 ] && bad "firmware/NVRAM errors present" || ok "no firmware load failures"
+    hdr "external deep-capture tools"
+    local t
+    for t in /usr/local/bin/wifi-recover.sh $(sibling wifi-recovery/wifi-recover.sh); do
+        [ -f "$t" ] && { info "available: $t"; break; }
+    done
+    echo
+    echo "  Driver reload (drops the association): netmaster fix   [rung R8]"
+}
+
+cmd_undo() {
+    hdr "netmaster undo"
+    local last
+    last=$(/usr/bin/ls -1t "$STATE_DIR"/undo-*.sh 2>/dev/null | /usr/bin/head -1)
+    [ -n "$last" ] || { warn "no undo journal found in $STATE_DIR"; return 1; }
+    echo "  most recent change set: $last"
+    echo
+    $CAT "$last" | $SED 's/^/    /'
+    echo
+    confirm "  run these undo commands?" || return 1
+    /usr/bin/bash "$last" 2>&1 | $SED 's/^/    /'
+    act "reload NM connections" "" $NM connection reload
+    act "restart NetworkManager" "" $SCTL restart NetworkManager
+    [ "$DRY" -eq 0 ] && /usr/bin/sleep 5
+    /usr/bin/mv "$last" "$last.applied"
+    discover; ladder; ladder_line
+}
+
+cmd_bundle() {
+    hdr "netmaster bundle"
+    local tb="$LOGDIR/netmaster-bundle-$STAMP.tar.gz"
+    # Logs only. Config backups stay in $STATE_DIR on local disk — they hold
+    # Wi-Fi PSKs, and exFAT cannot store 0600.
+    $TAR -czf "$tb" -C "$LOGDIR" $(/usr/bin/ls -1 "$LOGDIR" | $GREP -E '\.log$|\.txt$') 2>/dev/null
+    echo "  $tb"
+    echo "  ($(/usr/bin/du -sh "$tb" 2>/dev/null | $AWK '{print $1}'))"
+    echo "  Config backups deliberately NOT bundled (they contain PSKs): $STATE_DIR/backups/"
+}
+
+# ===========================================================================
+# dispatch
+# ===========================================================================
+case "$CMD" in
+    diagnose) cmd_diagnose ;;
+    fix)      cmd_fix ;;
+    status)   cmd_status ;;
+    harden)   cmd_harden ;;
+    portal)   cmd_portal ;;
+    panic)    cmd_panic ;;
+    restore)  cmd_restore ;;
+    warp)     cmd_warp ;;
+    wifi)     cmd_wifi ;;
+    undo)     cmd_undo ;;
+    bundle)   cmd_bundle ;;
+esac
+RC=$?
+/usr/bin/sync 2>/dev/null
+exit $RC

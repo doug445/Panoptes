@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+#
+# Panoptes — the all-seeing network watch
+# https://github.com/doug445/Panoptes
+#
+# Copyright (c) 2026 William MacKinnon <spilled-bowline0j@icloud.com>
+# SPDX-License-Identifier: MIT
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+import os
+import sys
+import subprocess
+
+# Daemonize: detach from terminal so closing the shell doesn't kill the tray
+if os.fork() > 0:
+    sys.exit(0)
+os.setsid()
+
+# Single-instance guard: if a tray is already running, exit (prevents duplicate icons).
+import fcntl
+_lock_fp = open(f"/run/user/{os.getuid()}/warp-tray.lock", "w")
+try:
+    fcntl.flock(_lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError:
+    sys.exit(0)  # another instance holds the lock
+
+KILLSWITCH = '/usr/local/bin/warp-killswitch'
+KILL_MARKER = '/etc/systemd/resolved.conf.warpkill-bak'
+
+
+def check_status():
+    try:
+        res = subprocess.run(['warp-cli', '--accept-tos', 'status'], capture_output=True, text=True)
+        return "Connected" in res.stdout
+    except Exception:
+        return False
+
+
+def is_killed():
+    # KILLED == the kill-switch backup marker exists (set on 'down', cleared on 'up').
+    return os.path.exists(KILL_MARKER)
+
+
+def killswitch(action):
+    # action: 'down' (tear down + reset internet) or 'up' (rebuild WARP + DNS)
+    subprocess.Popen(
+        ['sudo', KILLSWITCH, action],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    if action == 'down':
+        subprocess.Popen(['notify-send', 'Cloudflare WARP',
+                          'KILLED — stack torn down, internet reset (plain DNS)',
+                          '--icon=network-error'])
+    else:
+        subprocess.Popen(['notify-send', 'Cloudflare WARP',
+                          'Rebuilding — WARP + DNS restored',
+                          '--icon=network-vpn'])
+
+
+desktop = os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
+
+if 'kde' in desktop:
+    # --- KDE PLASMA (QT6) ---
+    from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
+    from PyQt6.QtGui import QIcon, QAction
+    from PyQt6.QtCore import QTimer
+
+    def toggle(reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            if check_status():
+                subprocess.Popen(['warp-cli', '--accept-tos', 'disconnect'])
+                subprocess.Popen(['notify-send', 'Cloudflare WARP', 'Disconnected', '--icon=network-offline'])
+            else:
+                subprocess.Popen(['warp-cli', '--accept-tos', 'connect'])
+                subprocess.Popen(['notify-send', 'Cloudflare WARP', 'Connected (Tunnel Only)', '--icon=network-vpn'])
+            QTimer.singleShot(1500, update_ui)
+
+    def update_ui():
+        if check_status():
+            tray.setIcon(icon_green)
+            tray.setToolTip("Cloudflare WARP on")
+        elif is_killed():
+            tray.setIcon(icon_red)
+            tray.setToolTip("Cloudflare WARP — KILLED (stack torn down)")
+        else:
+            tray.setIcon(icon_red)
+            tray.setToolTip("Cloudflare WARP off")
+
+    app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
+    home = os.path.expanduser('~')
+    icon_green = QIcon(f"{home}/.local/share/icons/warp-green.svg")
+    icon_red = QIcon(f"{home}/.local/share/icons/warp-red.svg")
+    tray = QSystemTrayIcon()
+
+    # Right-click: last-resort kill-switch menu
+    menu = QMenu()
+    act_down = QAction("\U0001F534  Last Resort: Tear Down (reset internet)")
+    act_down.triggered.connect(lambda: (killswitch('down'), QTimer.singleShot(2500, update_ui)))
+    act_up = QAction("\U0001F7E2  Rebuild WARP + restore DNS")
+    act_up.triggered.connect(lambda: (killswitch('up'), QTimer.singleShot(6000, update_ui)))
+    menu.addAction(act_down)
+    menu.addAction(act_up)
+    tray.setContextMenu(menu)
+
+    update_ui()
+    tray.setVisible(True)
+    tray.activated.connect(toggle)
+    timer = QTimer()
+    timer.timeout.connect(update_ui)
+    timer.start(2000)
+    sys.exit(app.exec())
+
+elif 'cinnamon' in desktop or 'x-cinnamon' in desktop:
+    # --- CINNAMON (XAPP/GTK) ---
+    import gi
+    gi.require_version('Gtk', '3.0')
+    gi.require_version('XApp', '1.0')
+    from gi.repository import Gtk, XApp, GLib
+
+    def on_click(icon, x, y, button, time, panel_position):
+        if button != 1:
+            return
+        if check_status():
+            subprocess.Popen(['warp-cli', '--accept-tos', 'disconnect'])
+            subprocess.Popen(['notify-send', 'Cloudflare WARP', 'Disconnected', '--icon=network-offline'])
+        else:
+            subprocess.Popen(['warp-cli', '--accept-tos', 'connect'])
+            subprocess.Popen(['notify-send', 'Cloudflare WARP', 'Connected (Tunnel Only)', '--icon=network-vpn'])
+        # 1.5s delay gives warp-cli time to settle before we re-check status
+        GLib.timeout_add(1500, lambda: update_ui() or GLib.SOURCE_REMOVE)
+
+    def update_ui():
+        if check_status():
+            icon.set_icon_name(icon_green)
+            icon.set_tooltip_text("Cloudflare WARP on")
+        elif is_killed():
+            icon.set_icon_name(icon_red)
+            icon.set_tooltip_text("Cloudflare WARP — KILLED (stack torn down)")
+        else:
+            icon.set_icon_name(icon_red)
+            icon.set_tooltip_text("Cloudflare WARP off")
+
+    def poll_status():
+        update_ui()
+        return GLib.SOURCE_CONTINUE
+
+    def do_killswitch(action, delay):
+        killswitch(action)
+        GLib.timeout_add(delay, lambda: update_ui() or GLib.SOURCE_REMOVE)
+
+    home = os.path.expanduser('~')
+    icon_green = f"{home}/.local/share/icons/warp-green.svg"
+    icon_red = f"{home}/.local/share/icons/warp-red.svg"
+    icon = XApp.StatusIcon()
+    icon.connect("button-release-event", on_click)
+
+    # Right-click: last-resort kill-switch menu
+    menu = Gtk.Menu()
+    mi_down = Gtk.MenuItem(label="\U0001F534  Last Resort: Tear Down (reset internet)")
+    mi_down.connect("activate", lambda _w: do_killswitch('down', 2500))
+    mi_up = Gtk.MenuItem(label="\U0001F7E2  Rebuild WARP + restore DNS")
+    mi_up.connect("activate", lambda _w: do_killswitch('up', 6000))
+    menu.append(mi_down)
+    menu.append(mi_up)
+    menu.show_all()
+    icon.set_secondary_menu(menu)
+
+    update_ui()
+    GLib.timeout_add(2000, poll_status)
+    Gtk.main()
+
+else:
+    print(f"Unsupported desktop environment: {desktop}")
+    sys.exit(1)

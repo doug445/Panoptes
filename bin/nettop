@@ -1,0 +1,81 @@
+#!/bin/bash
+#
+# Panoptes — the all-seeing network watch
+# https://github.com/doug445/Panoptes
+#
+# Copyright (c) 2026 William MacKinnon <spilled-bowline0j@icloud.com>
+# SPDX-License-Identifier: MIT
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+# nettop — summarize netwatch DROP log by top source IPs, with MAC + vendor + hostname
+# Uses arp-scan for LAN hosts (active + accurate vendor), falls back to ip neigh + OUI for WAN.
+# Whois fills in vendor when both arp-scan and OUI lookup come up empty (typical for WAN IPs).
+
+LOG=~/.local/share/netwatch/events.log
+OUI=/usr/share/hwdata/oui.txt
+[ -r "$LOG" ] || { echo "cannot read $LOG" >&2; exit 1; }
+
+declare -A whois_cache
+whois_lookup() {
+    local ip="$1" raw out
+    [[ -z "$ip" ]] && return
+    if [[ -n "${whois_cache[$ip]+_}" ]]; then printf '%s' "${whois_cache[$ip]}"; return; fi
+    case "$ip" in
+        10.*|127.*|169.254.*|192.168.*|::1|fe80:*|fc[0-9a-fA-F]*|fd[0-9a-fA-F]*) whois_cache[$ip]=""; return ;;
+        172.1[6-9].*|172.2[0-9].*|172.3[01].*) whois_cache[$ip]=""; return ;;
+        22[4-9].*|23[0-9].*|24[0-9].*|25[0-5].*) whois_cache[$ip]=""; return ;;
+    esac
+    command -v whois &>/dev/null || { whois_cache[$ip]=""; return; }
+    raw=$(timeout 3 whois "$ip" 2>/dev/null || true)
+    out=$(printf '%s\n' "$raw" | grep -iE '^(OrgName|org-name|Organization|owner)[[:space:]]*:' | head -1 | sed 's/^[^:]*:[[:space:]]*//' | tr -d '\r')
+    [ -z "$out" ] && out=$(printf '%s\n' "$raw" | grep -iE '^(NetName|netname)[[:space:]]*:' | head -1 | sed 's/^[^:]*:[[:space:]]*//' | tr -d '\r')
+    whois_cache[$ip]="$out"
+    printf '%s' "$out"
+}
+
+# Build LAN IP→MAC→vendor cache from one arp-scan pass
+declare -A lan_mac lan_vendor
+if command -v arp-scan &>/dev/null; then
+    while IFS=$'\t' read -r sip smac svendor; do
+        [ -z "$sip" ] && continue
+        lan_mac[$sip]="$smac"
+        lan_vendor[$sip]="$svendor"
+    done < <(sudo arp-scan --localnet --ignoredups 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')
+fi
+
+while read -r count ip; do
+    mac="${lan_mac[$ip]:-}"
+    vendor="${lan_vendor[$ip]:-}"
+
+    # Fallback: WAN IP or LAN host not found by arp-scan
+    if [ -z "$mac" ]; then
+        mac=$(ip neigh show "$ip" 2>/dev/null | grep -oP 'lladdr \K[a-f0-9:]+' | head -1)
+    fi
+    if [ -z "$vendor" ] && [ -n "$mac" ] && [ -r "$OUI" ]; then
+        prefix=$(echo "${mac:0:8}" | tr -d : | tr 'a-f' 'A-F')
+        vendor=$(grep "^$prefix" "$OUI" 2>/dev/null | head -1 | sed 's/^[0-9A-F]*\s*(base 16)\s*//' | tr -d '\r')
+    fi
+    if [ -z "$vendor" ]; then
+        vendor=$(whois_lookup "$ip")
+    fi
+
+    host=$(getent hosts "$ip" 2>/dev/null | awk '{print $2}')
+    printf "%7s %-15s %-18s %-30s %s\n" "$count" "$ip" "${mac:--}" "${vendor:--}" "${host:-}"
+done < <(grep DROP "$LOG" | awk -F'src=' 'NF>1{print $2}' | awk '{print $1}' | sort | uniq -c | sort -rn)

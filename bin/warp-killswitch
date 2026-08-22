@@ -1,0 +1,171 @@
+#!/bin/bash
+#
+# Panoptes — the all-seeing network watch
+# https://github.com/doug445/Panoptes
+#
+# Copyright (c) 2026 William MacKinnon <spilled-bowline0j@icloud.com>
+# SPDX-License-Identifier: MIT
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+# Last-resort Cloudflare WARP kill-switch helper (root). Installed by
+# warp-killswitch install.sh. Distro-agnostic (systemd + systemd-resolved).
+#
+#   down   tear WARP + its whole network stack down to nothing, stop + DISABLE
+#          the daemon (persists across reboot), drop to plain DNS (1.1.1.2).
+#   up     restore the previous DNS verbatim, re-enable + start the daemon,
+#          reconnect WARP.
+#   state  print 'killed' or 'armed'.
+#
+# Touches ONLY WARP's own artifacts + systemd-resolved. firewalld/netwatch are
+# never touched. Idempotent. WARP's routing table is DISCOVERED, not hardcoded.
+# If resolved.conf is locked with `chattr +i` (hardened boxes / DNS tray), 'down'
+# drops the flag and leaves it UNLOCKED while killed; 'up' restores the original
+# immutable posture on rebuild.
+set -u
+
+RESOLVED_CONF="/etc/systemd/resolved.conf"
+BACKUP="/etc/systemd/resolved.conf.warpkill-bak"
+WARP_IF="CloudflareWARP"
+
+# Some hardened boxes lock resolved.conf with `chattr +i` (the DNS tray
+# unlock/relocks it). A write to an immutable file fails with EPERM, so we'd
+# silently NOT swap DNS. So: on 'down' we drop the flag to write the captive
+# config and LEAVE IT UNLOCKED while killed (so the portal config can be
+# hand-edited), recording in RELOCK_FLAG that it must be re-locked. On 'up' we
+# restore the backup and re-apply the immutable flag iff RELOCK_FLAG is present.
+# Degrades to a no-op where chattr/lsattr or the filesystem don't support it.
+RELOCK_FLAG="/etc/systemd/resolved.conf.warpkill-relock"
+resolved_is_immutable() {
+    lsattr "$RESOLVED_CONF" 2>/dev/null | awk 'NR==1{print $1}' | grep -q 'i'
+}
+
+discover_tables() {
+    # tables that currently hold routes on the WARP interface, plus the known
+    # default as a harmless fallback
+    { ip route show table all 2>/dev/null | grep " dev ${WARP_IF} " \
+          | grep -oE 'table [0-9]+' | awk '{print $2}'
+      echo 65743
+    } | sort -u
+}
+
+warp_down() {
+    # 1. graceful tunnel down (best effort)
+    warp-cli --accept-tos disconnect >/dev/null 2>&1
+
+    # 2. capture WARP's routing tables BEFORE we tear the iface down
+    local tbls t p
+    tbls=$(discover_tables)
+
+    # 3. stop + disable the daemon so nothing rebuilds the stack (incl. at boot)
+    systemctl stop    warp-svc >/dev/null 2>&1
+    systemctl disable warp-svc >/dev/null 2>&1
+
+    # 4. force-remove WARP network artifacts the daemon may have left behind
+    ip link del "$WARP_IF" 2>/dev/null
+    for t in $tbls; do
+        ip route flush table "$t" 2>/dev/null
+        for p in $(ip rule show 2>/dev/null | grep -E "lookup ${t}( |\$)" | grep -oE '^[0-9]+'); do
+            ip rule del priority "$p" 2>/dev/null
+        done
+    done
+    nft delete table inet cloudflare-warp 2>/dev/null
+
+    # --- asahi-netfix: main-table route purge v2 ---
+    # discover_tables() only matches NUMERIC table ids, so WARP's split-tunnel
+    # route set in the *main* table was never flushed. If the interface survives
+    # `ip link del` (persistent tun, or warp-svc still running while merely
+    # "Disconnected"), those routes stay behind as
+    # `... dev CloudflareWARP scope link linkdown` and, being more specific than
+    # the DHCP default, blackhole the whole internet while the LAN still works.
+    #
+    # NOTE: do NOT feed route lines back to `ip route del` — they end in the
+    # status flag `linkdown`, which is not valid input and makes every delete
+    # fail. Flush BY DEVICE instead.
+    if ip link show "$WARP_IF" >/dev/null 2>&1 \
+       || ip route show table all 2>/dev/null | grep -q " dev $WARP_IF"; then
+        # a .socket unit would re-activate the daemon and reinstall everything
+        systemctl stop warp-svc.socket 2>/dev/null
+        for _p in 1 2 3; do
+            ip -4 route flush dev "$WARP_IF" 2>/dev/null
+            ip -6 route flush dev "$WARP_IF" 2>/dev/null
+            for _t in $(ip route show table all 2>/dev/null | grep " dev $WARP_IF" \
+                        | grep -oE 'table [0-9]+' | awk '{print $2}' | sort -u); do
+                ip route flush table "$_t" 2>/dev/null
+            done
+            ip route show table all 2>/dev/null | grep -q " dev $WARP_IF" || break
+            sleep 1
+        done
+        ip link set "$WARP_IF" down 2>/dev/null
+        ip link del  "$WARP_IF" 2>/dev/null
+    fi
+    # --- end asahi-netfix ---
+
+
+    # 5. drop to plain DNS for captive portals (back up the real conf once).
+    #    Reading an immutable file is fine; only the write below needs it unlocked.
+    [ -f "$BACKUP" ] || cp -a "$RESOLVED_CONF" "$BACKUP"
+    if resolved_is_immutable; then
+        chattr -i "$RESOLVED_CONF" 2>/dev/null && : > "$RELOCK_FLAG"
+    fi
+    cat > "$RESOLVED_CONF" <<'RESOLVED_EOF'
+# Temporary captive-portal / last-resort config written by warp-killswitch.
+# Original saved at /etc/systemd/resolved.conf.warpkill-bak; restored on 'up'.
+[Resolve]
+DNS=1.1.1.2
+FallbackDNS=1.0.0.1
+DNSOverTLS=no
+DNSSEC=no
+MulticastDNS=no
+LLMNR=no
+RESOLVED_EOF
+    # left UNLOCKED on purpose while killed; RELOCK_FLAG remembers to re-lock on 'up'.
+    systemctl restart systemd-resolved >/dev/null 2>&1
+    return 0
+}
+
+warp_up() {
+    if [ -f "$BACKUP" ]; then
+        resolved_is_immutable && chattr -i "$RESOLVED_CONF" 2>/dev/null
+        cp -a "$BACKUP" "$RESOLVED_CONF"
+        # restore the original immutable posture if 'down' had to remove it
+        if [ -f "$RELOCK_FLAG" ]; then
+            chattr +i "$RESOLVED_CONF" 2>/dev/null
+            rm -f "$RELOCK_FLAG"
+        fi
+        rm -f "$BACKUP"
+    fi
+    systemctl restart systemd-resolved >/dev/null 2>&1
+    systemctl enable warp-svc >/dev/null 2>&1
+    systemctl start  warp-svc >/dev/null 2>&1
+    local i
+    for i in 1 2 3 4 5 6 7 8; do
+        warp-cli --accept-tos status >/dev/null 2>&1 && break
+        sleep 1
+    done
+    warp-cli --accept-tos connect >/dev/null 2>&1
+    return 0
+}
+
+case "${1:-}" in
+    down)  warp_down ;;
+    up)    warp_up ;;
+    state) [ -f "$BACKUP" ] && echo killed || echo armed ;;
+    *)     echo "usage: $0 {down|up|state}" >&2; exit 2 ;;
+esac
