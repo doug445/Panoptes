@@ -36,9 +36,36 @@
 # arp-scan (LAN), nping probe storm, masscan full-port sweep, sslscan, SMB/NBT
 # enum, SNMP (onesixtyone), IKE/IPsec (ike-scan), hping3 stealth/flood scans.
 #
+# Usage:
+#   probesource              launch the interactive investigator
+#   probesource -h, --help   show this help
+#
+# Takes no other arguments: targets are chosen from the menu, not the command
+# line. Anything else is a typo rather than a request, and is rejected.
+#
 # Requires: dialog. Most tactics escalate via sudo (cached at startup).
 
 set -uo pipefail
+
+# ── argument guard ───────────────────────────────────────────────────────────
+# Parsed before anything else so that --help works with dialog absent, and
+# without touching log files or creating state directories as a side effect.
+usage() { sed -n '/^# probesource —/,/^[^#]/p' "$0" | sed -e '$d' -e 's/^# \?//'; }
+
+if [ "$#" -gt 0 ]; then
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            printf 'probesource: unexpected argument: %s\n' "$1" >&2
+            printf 'This tool is interactive and takes no arguments.\n' >&2
+            printf 'Try: probesource --help\n' >&2
+            exit 2
+            ;;
+    esac
+fi
 
 # ── paths / setup ────────────────────────────────────────────────────────────
 LOG_DIR="${HOME}/.local/share/probesource"
