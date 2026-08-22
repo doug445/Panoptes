@@ -6,32 +6,50 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Note on the file-selection loops below: they are written as explicit if/then
+# accumulators rather than `grep -q X && printf ...`, because the latter makes
+# the command substitution inherit the exit status of the LAST iteration. With
+# `bash -e` that fails the whole step whenever the alphabetically-last file in
+# bin/ is not of the type being selected.
+
 jobs:
   shellcheck:
     name: shellcheck (bash tools)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
+
       - name: Syntax check
         run: |
-          for f in bin/*; do
+          for f in bin/* install.sh uninstall.sh; do
             [ -f "$f" ] || continue
-            head -1 "$f" | grep -q bash || continue
-            bash -n "$f"
+            if head -1 "$f" | grep -q bash; then bash -n "$f"; fi
           done
+
       - name: ShellCheck (errors are fatal)
         run: |
-          files=$(for f in bin/*; do [ -f "$f" ] || continue; head -1 "$f" | grep -q bash && printf '%s ' "$f"; done)
-          # shellcheck-clean at error level. Style warnings are reported below
-          # but do not fail the build: these are field-tested operational tools
-          # and silencing SC2034/SC2046 by rewriting them is the riskier change.
+          files=""
+          for f in bin/* install.sh uninstall.sh; do
+            [ -f "$f" ] || continue
+            if head -1 "$f" | grep -q bash; then files="$files $f"; fi
+          done
+          # These are field-tested operational tools. Style rules such as SC2034
+          # and SC2046 are reported in the next step but do not fail the build;
+          # rewriting working code to silence them is the riskier change.
+          # shellcheck disable=SC2086
           shellcheck -S error $files
-      - name: ShellCheck warnings (informational)
+
+      - name: ShellCheck style (informational)
         continue-on-error: true
         run: |
-          files=$(for f in bin/*; do [ -f "$f" ] || continue; head -1 "$f" | grep -q bash && printf '%s ' "$f"; done)
+          files=""
+          for f in bin/* install.sh uninstall.sh; do
+            [ -f "$f" ] || continue
+            if head -1 "$f" | grep -q bash; then files="$files $f"; fi
+          done
           shellcheck -S warning $files || true
 
   python:
@@ -39,29 +57,41 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
       - name: Compile check
         run: |
           for f in bin/*; do
             [ -f "$f" ] || continue
-            head -1 "$f" | grep -q python || continue
-            python3 -B -m py_compile "$f"
+            if head -1 "$f" | grep -q python; then python3 -B -m py_compile "$f"; fi
           done
-      - name: Ruff (pyflakes + syntax are fatal)
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Ruff (syntax + pyflakes are fatal)
         run: |
-          pip install ruff
-          files=$(for f in bin/*; do [ -f "$f" ] || continue; head -1 "$f" | grep -q python && printf '%s ' "$f"; done)
+          files=""
+          for f in bin/*; do
+            [ -f "$f" ] || continue
+            if head -1 "$f" | grep -q python; then files="$files $f"; fi
+          done
+          [ -n "$files" ] || { echo "no python tools found"; exit 0; }
           # E9 = syntax/runtime errors, F = pyflakes (undefined names, unused
-          # imports). Style and opinion rules are reported below but do not fail
-          # the build, matching the shellcheck policy for the bash tools.
+          # imports). --isolated so a stray config cannot change what this means.
           ruff check --isolated --no-cache --select E9,F $files
 
       - name: Ruff style (informational)
         continue-on-error: true
         run: |
-          files=$(for f in bin/*; do [ -f "$f" ] || continue; head -1 "$f" | grep -q python && printf '%s ' "$f"; done)
+          files=""
+          for f in bin/*; do
+            [ -f "$f" ] || continue
+            if head -1 "$f" | grep -q python; then files="$files $f"; fi
+          done
           ruff check --isolated --no-cache --output-format=concise $files || true
 
   license:
@@ -69,11 +99,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: |
+      - name: Every tool carries an SPDX MIT header
+        run: |
           missing=0
-          for f in bin/*; do
+          for f in bin/* install.sh uninstall.sh; do
             [ -f "$f" ] || continue
-            grep -q 'SPDX-License-Identifier: MIT' "$f" || { echo "MISSING LICENSE: $f"; missing=1; }
+            if ! grep -q 'SPDX-License-Identifier: MIT' "$f"; then
+              echo "MISSING LICENSE: $f"
+              missing=1
+            fi
           done
-          [ "$missing" -eq 0 ] && echo "all tools licensed"
+          if [ "$missing" -eq 0 ]; then echo "all tools licensed"; fi
           exit "$missing"
