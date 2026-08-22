@@ -191,9 +191,11 @@ that writes says so, and `harden-dns.sh` supports `--dry-run`.
   that is the pair they were written for. Change the addresses at the top of
   each file to suit. `harden-dns.sh` is the one that takes policy from the
   environment instead.
-- **Style lint is advisory.** CI gates on `shellcheck -S error` and reports
-  warnings without failing. These are operational tools that have been used in
-  anger; rewriting them to silence `SC2034` would be the riskier change.
+- **Lint is clean and enforced.** CI fails on any `shellcheck` warning and on
+  the full default `ruff` ruleset. Where word splitting is deliberate — a file
+  list expanding into `tar` arguments, a tactic-id list into `run_set` — the
+  line carries an inline `shellcheck disable=SC2046` stating why, rather than
+  being quoted into something that would not work.
 - **`netwatch` needs a firewalld log target** to have anything to read.
 
 ## Contributing
@@ -202,9 +204,11 @@ Issues and pull requests welcome. Please run the lint workflow locally before
 opening a PR:
 
 ```bash
-shellcheck -S error bin/*        # bash tools
-ruff check bin/dns-tray bin/warp-tray   # python tools
+shellcheck -S warning bin/* install.sh uninstall.sh   # bash tools
+ruff check --isolated bin/dns-tray bin/warp-tray      # python tools
 ```
+
+Both are clean on `main` and CI fails on any regression.
 
 ## License
 
