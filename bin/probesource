@@ -38,10 +38,12 @@
 #
 # Usage:
 #   probesource              launch the interactive investigator
+#   probesource <ip>         skip the target picker and investigate <ip>
 #   probesource -h, --help   show this help
 #
-# Takes no other arguments: targets are chosen from the menu, not the command
-# line. Anything else is a typo rather than a request, and is rejected.
+# <ip> may be IPv4 or IPv6. You still choose the investigation mode; only the
+# target picker is skipped. Any other argument is a typo rather than a request,
+# and is rejected.
 #
 # Requires: dialog. Most tactics escalate via sudo (cached at startup).
 
@@ -58,13 +60,19 @@ if [ "$#" -gt 0 ]; then
             usage
             exit 0
             ;;
-        *)
-            printf 'probesource: unexpected argument: %s\n' "$1" >&2
-            printf 'This tool is interactive and takes no arguments.\n' >&2
+        -*)
+            printf 'probesource: unknown option: %s\n' "$1" >&2
             printf 'Try: probesource --help\n' >&2
             exit 2
             ;;
     esac
+    if [ "$#" -gt 1 ]; then
+        printf 'probesource: too many arguments (expected at most one target)\n' >&2
+        printf 'Try: probesource --help\n' >&2
+        exit 2
+    fi
+    # A bare argument is a candidate target. It cannot be validated here: the
+    # address helpers are defined further down. main() checks it.
 fi
 
 # ── paths / setup ────────────────────────────────────────────────────────────
@@ -1070,10 +1078,18 @@ browse_logs() {
 # ── main loop ────────────────────────────────────────────────────────────────
 investigate() {
     local ip mode tactics rounds
+    # A target given on the command line skips the picker. With one set there
+    # is nothing to go "Back" to, so cancelling the mode menu leaves instead of
+    # looping on a picker that would never be shown again.
+    local preset="${1-}"
     while true; do
-        ip=$(choose_target) || return 0
-        mode=$(choose_mode) || continue
-        [[ "$mode" == "B" ]] && continue
+        if [[ -n "$preset" ]]; then
+            ip="$preset"
+        else
+            ip=$(choose_target) || return 0
+        fi
+        mode=$(choose_mode) || { [[ -n "$preset" ]] && return 0; continue; }
+        [[ "$mode" == "B" ]] && { [[ -n "$preset" ]] && return 0; continue; }
         break
     done
 
@@ -1155,12 +1171,35 @@ resume_scan() {
 }
 
 main() {
+    local cli_target="${1-}"
+    if [[ -n "$cli_target" ]]; then
+        # Validated here rather than in the early guard because the address
+        # helpers do not exist yet at that point. Reported on stderr, not via
+        # die(), which opens a dialog box and needs a UI a CLI typo does not.
+        if ! valid_ipv4 "$cli_target" && ! valid_ipv6 "$cli_target"; then
+            printf 'probesource: not an IPv4 or IPv6 address: %s\n' "$cli_target" >&2
+            printf 'Resolve a hostname first, e.g.  probesource "$(dig +short example.com | head -1)"\n' >&2
+            exit 2
+        fi
+    fi
+
     if ! sudo -n true 2>/dev/null; then
         clear
         echo "probesource needs sudo for arp-scan, nmap OS detect, journalctl -k,"
         echo "tcpdump, tshark, conntrack, ipset, ike-scan, hping3, masscan, p0f."
         echo "(enum4linux-ng runs unprivileged; pipx-installed at ~/.local/bin)"
         sudo -v || die "sudo required"
+    fi
+
+    # A command-line target runs one investigation and leaves, rather than
+    # dropping into the menu loop afterwards.
+    if [[ -n "$cli_target" ]]; then
+        cleanup_state
+        investigate "$cli_target"
+        clear
+        echo "Logs saved under: $LOG_DIR"
+        echo "Master log:       $MASTER_LOG"
+        return 0
     fi
 
     while true; do
