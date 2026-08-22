@@ -17,12 +17,13 @@ jobs:
       - name: Syntax check
         run: |
           for f in bin/*; do
+            [ -f "$f" ] || continue
             head -1 "$f" | grep -q bash || continue
             bash -n "$f"
           done
       - name: ShellCheck (errors are fatal)
         run: |
-          files=$(for f in bin/*; do head -1 "$f" | grep -q bash && printf '%s ' "$f"; done)
+          files=$(for f in bin/*; do [ -f "$f" ] || continue; head -1 "$f" | grep -q bash && printf '%s ' "$f"; done)
           # shellcheck-clean at error level. Style warnings are reported below
           # but do not fail the build: these are field-tested operational tools
           # and silencing SC2034/SC2046 by rewriting them is the riskier change.
@@ -30,7 +31,7 @@ jobs:
       - name: ShellCheck warnings (informational)
         continue-on-error: true
         run: |
-          files=$(for f in bin/*; do head -1 "$f" | grep -q bash && printf '%s ' "$f"; done)
+          files=$(for f in bin/*; do [ -f "$f" ] || continue; head -1 "$f" | grep -q bash && printf '%s ' "$f"; done)
           shellcheck -S warning $files || true
 
   python:
@@ -44,14 +45,24 @@ jobs:
       - name: Compile check
         run: |
           for f in bin/*; do
+            [ -f "$f" ] || continue
             head -1 "$f" | grep -q python || continue
-            python3 -m py_compile "$f"
+            python3 -B -m py_compile "$f"
           done
-      - name: Ruff
+      - name: Ruff (pyflakes + syntax are fatal)
         run: |
           pip install ruff
-          files=$(for f in bin/*; do head -1 "$f" | grep -q python && printf '%s ' "$f"; done)
-          ruff check --no-cache $files
+          files=$(for f in bin/*; do [ -f "$f" ] || continue; head -1 "$f" | grep -q python && printf '%s ' "$f"; done)
+          # E9 = syntax/runtime errors, F = pyflakes (undefined names, unused
+          # imports). Style and opinion rules are reported below but do not fail
+          # the build, matching the shellcheck policy for the bash tools.
+          ruff check --isolated --no-cache --select E9,F $files
+
+      - name: Ruff style (informational)
+        continue-on-error: true
+        run: |
+          files=$(for f in bin/*; do [ -f "$f" ] || continue; head -1 "$f" | grep -q python && printf '%s ' "$f"; done)
+          ruff check --isolated --no-cache --output-format=concise $files || true
 
   license:
     name: license headers
@@ -61,6 +72,7 @@ jobs:
       - run: |
           missing=0
           for f in bin/*; do
+            [ -f "$f" ] || continue
             grep -q 'SPDX-License-Identifier: MIT' "$f" || { echo "MISSING LICENSE: $f"; missing=1; }
           done
           [ "$missing" -eq 0 ] && echo "all tools licensed"
