@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+#
+# Panoptes — the all-seeing network watch
+# https://github.com/doug445/Panoptes
+#
+# Copyright (c) 2026 William MacKinnon <spilled-bowline0j@icloud.com>
+# SPDX-License-Identifier: MIT
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+# checkdns — resolver, WARP, mDNS and ECH status in one readout.
+#
+set -uo pipefail
+
+checkdns() {
+    resolvectl status | sed \
+        -e 's/94\.140\.14\.14/94.140.14.14 (AdGuard DNS)/g' \
+        -e 's/94\.140\.15\.15/94.140.15.15 (AdGuard DNS)/g' \
+        -e 's/2a10:50c0::ad1:ff/2a10:50c0::ad1:ff (AdGuard DNS)/g' \
+        -e 's/2a10:50c0::ad2:ff/2a10:50c0::ad2:ff (AdGuard DNS)/g' \
+        -e 's/1\.1\.1\.1/1.1.1.1 (Cloudflare)/g' \
+        -e 's/1\.0\.0\.1/1.0.0.1 (Cloudflare)/g' \
+        -e 's/9\.9\.9\.9/9.9.9.9 (Quad9)/g' \
+        -e 's/149\.112\.112\.112/149.112.112.112 (Quad9)/g'
+    # Cloudflare WARP status    
+    printf "\n\e[1mCloudflare WARP\e[0m\n"
+    local warp_status warp_network
+    warp_status=$(warp-cli --accept-tos status 2>/dev/null | grep -oP 'Status update: \K.*')
+    warp_network=$(warp-cli --accept-tos status 2>/dev/null | grep -oP 'Network: \K.*')
+    if [[ -n "$warp_status" ]]; then
+        printf "\e[0;94m%21s\e[0m %s\n" "Status:" "$warp_status"
+        printf "\e[0;94m%21s\e[0m %s\n" "Network:" "$warp_network"
+    else
+        printf "\e[0;94m%21s\e[0m \e[0;31mnot running\e[0m\n" "Status:"
+    fi
+    
+    printf "\n\e[1mAvahi (mDNS)\e[0m\n\e[0;94m%21s\e[0m %s\n\e[0;94m%21s\e[0m %s\n" \
+    "Current Status:" "$(systemctl is-active avahi-daemon 2>/dev/null)" \
+    "Startup:" "$(systemctl is-enabled avahi-daemon 2>/dev/null)"
+    
+    # ECH status
+    local domain="defo.ie"
+    printf "\n\e[1mECH Status\e[0m\n"
+
+    # DNS layer: HTTPS record carries ECHConfig
+    local https_rec echconfig
+    https_rec=$(dig +short HTTPS "$domain" 2>/dev/null)
+    echconfig=$(echo "$https_rec" | grep -o 'ech=[A-Za-z0-9+/=]*' | head -1)
+    
+    if [[ -n "$echconfig" ]]; then
+        printf "\e[0;94m%21s\e[0m \e[0;32myes\e[0m (%s…)\n" "DNS ECHConfig:" "${echconfig:0:24}"
+    elif [[ -n "$https_rec" ]]; then
+        printf "\e[0;94m%21s\e[0m \e[0;33mHTTPS record found, no ECH\e[0m\n" "DNS ECHConfig:"
+    else
+        printf "\e[0;94m%21s\e[0m \e[0;31mno HTTPS record returned\e[0m\n" "DNS ECHConfig:"
+    fi
+
+    # TLS layer: curl --ech hard (no cleartext-SNI fallback)
+    local curl_err
+    curl_err=$(\curl --ech hard --doh-url https://dns.cloudflare.com/dns-query -fso /dev/null "https://$domain/" 2>&1)
+    local curl_exit=$?
+    
+    if [[ $curl_exit -eq 0 ]]; then
+        printf "\e[0;94m%21s\e[0m \e[0;32mworking\e[0m\n" "TLS ECH (curl):"
+    elif echo "$curl_err" | grep -qi "unknown\|unrecognized\|invalid option\|does not support this"; then
+        printf "\e[0;94m%21s\e[0m \e[0;33mcurl lacks ECH support\e[0m (libcurl: %s)\n" "TLS ECH (curl):" "$(\curl -V | sed -n '1s/.*\(libcurl[^ ]*\).*/\1/p')"
+    else
+        printf "\e[0;94m%21s\e[0m \e[0;31mfailed\e[0m (verify in browser: defo.ie/ech-check.php)\n" "TLS ECH (curl):"
+    fi
+}
+
+checkdns "$@"

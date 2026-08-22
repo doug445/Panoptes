@@ -1,0 +1,67 @@
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  shellcheck:
+    name: shellcheck (bash tools)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Syntax check
+        run: |
+          for f in bin/*; do
+            head -1 "$f" | grep -q bash || continue
+            bash -n "$f"
+          done
+      - name: ShellCheck (errors are fatal)
+        run: |
+          files=$(for f in bin/*; do head -1 "$f" | grep -q bash && printf '%s ' "$f"; done)
+          # shellcheck-clean at error level. Style warnings are reported below
+          # but do not fail the build: these are field-tested operational tools
+          # and silencing SC2034/SC2046 by rewriting them is the riskier change.
+          shellcheck -S error $files
+      - name: ShellCheck warnings (informational)
+        continue-on-error: true
+        run: |
+          files=$(for f in bin/*; do head -1 "$f" | grep -q bash && printf '%s ' "$f"; done)
+          shellcheck -S warning $files || true
+
+  python:
+    name: ruff + compile (python tools)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile check
+        run: |
+          for f in bin/*; do
+            head -1 "$f" | grep -q python || continue
+            python3 -m py_compile "$f"
+          done
+      - name: Ruff
+        run: |
+          pip install ruff
+          files=$(for f in bin/*; do head -1 "$f" | grep -q python && printf '%s ' "$f"; done)
+          ruff check --no-cache $files
+
+  license:
+    name: license headers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          missing=0
+          for f in bin/*; do
+            grep -q 'SPDX-License-Identifier: MIT' "$f" || { echo "MISSING LICENSE: $f"; missing=1; }
+          done
+          [ "$missing" -eq 0 ] && echo "all tools licensed"
+          exit "$missing"

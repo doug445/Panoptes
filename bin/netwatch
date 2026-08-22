@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+#
+# Panoptes — the all-seeing network watch
+# https://github.com/doug445/Panoptes
+#
+# Copyright (c) 2026 William MacKinnon <spilled-bowline0j@icloud.com>
+# SPDX-License-Identifier: MIT
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+# netwatch — monitor for network probes/attacks, send desktop notifications
+# Watches firewalld dropped packets + new inbound connections + ARP anomalies
+
+set -euo pipefail
+
+LOG_DIR="${HOME}/.local/share/netwatch"
+LOG_FILE="${LOG_DIR}/events.log"
+POLL_INTERVAL=10
+ALERT_THRESHOLD=5          # notify after this many drops from same IP in window
+ALERT_WINDOW=60            # seconds
+SUMMARY_INTERVAL=300       # summary notification every 5 min if activity
+
+mkdir -p "$LOG_DIR"
+
+# Resolve DBUS for notify-send from a systemd service
+if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"
+fi
+
+notify() {
+    local urgency="$1" title="$2" body="$3"
+    # KDE pins critical notifications regardless of -t; downgrade to normal
+    # and prepend marker to title so alerts still look urgent.
+    local icon="network-error"
+    if [[ "$urgency" == "critical" ]]; then
+        urgency="normal"
+        title="⚠ $title"
+        icon="security-low"
+    fi
+    # --hint=string:desktop-entry:netwatch — so KDE Plasma keeps entries in the
+    # notification history (bell icon). Without it, Plasma 6 treats the app as
+    # unknown and discards notifications after the popup timeout.
+    notify-send -u "$urgency" -t 15000 -i "$icon" -a "NetWatch" \
+        --hint=string:desktop-entry:netwatch \
+        "$title" "$body" 2>/dev/null || true
+}
+
+log_event() {
+    local ts
+    ts=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$ts] $1" >> "$LOG_FILE"
+}
+
+# Track per-IP drop counts within the alert window
+declare -A ip_counts
+declare -A ip_first_seen
+declare -A ip_alerted
+last_summary=$(date +%s)
+last_check=$last_summary
+total_drops=0
+unique_ips=0
+
+reset_counters() {
+    ip_counts=()
+    ip_first_seen=()
+    ip_alerted=()
+    total_drops=0
+    unique_ips=0
+}
+
+# Filter out broadcast/discovery noise that isn't a real probe
+is_noise() {
+    local src="$1" dst="$2" dpt="$3"
+    [[ "$src" == "unknown" || "$src" == 127.* || "$src" == "::1" || "$src" == fe80:* ]] && return 0
+    [[ "$dst" == 255.255.255.255 || "$dst" == 224.* || "$dst" == *.255 ]] && return 0
+    [[ "$dst" == ff[0-9a-f][0-9a-f]:* || "$dst" == fe80:* ]] && return 0
+    case "$dpt" in
+        5353)  return 0 ;;  # mDNS
+        1900)  return 0 ;;  # SSDP/UPnP
+        137)   return 0 ;;  # NetBIOS name service
+        138)   return 0 ;;  # NetBIOS datagram
+        15600) return 0 ;;  # Samsung Smart View
+        15500) return 0 ;;  # LG Smart Share
+        3702)  return 0 ;;  # WS-Discovery
+    esac
+    return 1
+}
+
+process_drop() {
+    local src_ip="$1" proto="$2" dpt="$3"
+    local now
+    now=$(date +%s)
+
+    # Expire old entries outside the alert window
+    for ip in "${!ip_first_seen[@]}"; do
+        if (( now - ip_first_seen[$ip] > ALERT_WINDOW )); then
+            unset "ip_counts[$ip]" "ip_first_seen[$ip]" "ip_alerted[$ip]"
+        fi
+    done
+
+    # Count this drop
+    if [[ -z "${ip_counts[$src_ip]:-}" ]]; then
+        ip_counts[$src_ip]=0
+        ip_first_seen[$src_ip]=$now
+        (( unique_ips++ )) || true
+    fi
+    (( ip_counts[$src_ip]++ )) || true
+    (( total_drops++ )) || true
+
+    log_event "DROP src=$src_ip proto=$proto dpt=$dpt"
+
+    # Alert if threshold crossed for this IP
+    if (( ip_counts[$src_ip] >= ALERT_THRESHOLD )) && [[ -z "${ip_alerted[$src_ip]:-}" ]]; then
+        ip_alerted[$src_ip]=1
+        notify critical "Port Scan Detected" "Source: $src_ip\n${ip_counts[$src_ip]} probes in ${ALERT_WINDOW}s (${proto})"
+        log_event "ALERT port_scan src=$src_ip count=${ip_counts[$src_ip]}"
+    fi
+}
+
+check_arp_spoofing() {
+    local gateway_ip gateway_mac
+    gateway_ip=$(ip route show default | awk '/default/{print $3; exit}')
+    [[ -z "$gateway_ip" ]] && return
+
+    gateway_mac=$(ip neigh show "$gateway_ip" 2>/dev/null | awk '{print $5; exit}')
+    [[ -z "$gateway_mac" ]] && return
+
+    local stored_mac
+    stored_mac=$(cat "$LOG_DIR/gateway_mac" 2>/dev/null || true)
+
+    if [[ -z "$stored_mac" ]]; then
+        echo "$gateway_mac" > "$LOG_DIR/gateway_mac"
+        echo "$gateway_ip" > "$LOG_DIR/gateway_ip"
+        log_event "ARP gateway=$gateway_ip mac=$gateway_mac (stored)"
+    elif [[ "$stored_mac" != "$gateway_mac" ]]; then
+        notify critical "ARP Spoofing Detected!" "Gateway $gateway_ip MAC changed!\nWas: $stored_mac\nNow: $gateway_mac\n\nSomeone may be intercepting your traffic!"
+        log_event "ALERT arp_spoof gateway=$gateway_ip old=$stored_mac new=$gateway_mac"
+        echo "$gateway_mac" > "$LOG_DIR/gateway_mac"
+    fi
+}
+
+check_new_network() {
+    local current_ssid
+    current_ssid=$(nmcli -t -f active,ssid dev wifi 2>/dev/null | grep '^yes:' | cut -d: -f2- || true)
+    local stored_ssid
+    stored_ssid=$(cat "$LOG_DIR/current_ssid" 2>/dev/null || true)
+
+    if [[ "$current_ssid" != "$stored_ssid" ]] && [[ -n "$current_ssid" ]]; then
+        echo "$current_ssid" > "$LOG_DIR/current_ssid"
+        # Reset gateway MAC when network changes
+        rm -f "$LOG_DIR/gateway_mac"
+        log_event "NETWORK changed to '$current_ssid'"
+        notify normal "Network Changed" "Connected to: $current_ssid\nMonitoring started."
+    fi
+}
+
+# ── Startup ─────────────────────────────────────────────────────────────
+log_event "NetWatch started (pid=$$)"
+notify normal "NetWatch Active" "Monitoring for network probes and attacks."
+check_new_network
+check_arp_spoofing
+
+# ── Main event loop ─────────────────────────────────────────────────────
+# Single-process design: process substitution keeps the while loop in this
+# shell so counters and associative arrays are shared — no subshell isolation.
+exec 3< <(journalctl -k -f --no-pager -o short 2>/dev/null)
+
+while true; do
+    if read -r -t "$POLL_INTERVAL" line <&3; then
+        if [[ "$line" == *"_DROP"* ]] || [[ "$line" == *"FINAL_REJECT"* ]]; then
+            src_ip=$(echo "$line" | grep -oP 'SRC=\K[0-9a-fA-F.:]+' || echo "unknown")
+            proto=$(echo "$line" | grep -oP 'PROTO=\K\w+' || echo "?")
+            dpt=$(echo "$line" | grep -oP 'DPT=\K\d+' || echo "?")
+            dst_ip=$(echo "$line" | grep -oP 'DST=\K[0-9a-fA-F.:]+' || echo "")
+
+            if ! is_noise "$src_ip" "$dst_ip" "$dpt"; then
+                process_drop "$src_ip" "$proto" "$dpt"
+            fi
+        fi
+    fi
+
+    # Periodic checks
+    now=$(date +%s)
+    if (( now - last_check >= POLL_INTERVAL )); then
+        check_arp_spoofing
+        check_new_network
+        last_check=$now
+    fi
+
+    # Periodic summary
+    if (( total_drops > 0 && now - last_summary >= SUMMARY_INTERVAL )); then
+        notify low "NetWatch Summary" "${total_drops} dropped packets from ${unique_ips} source(s) in last ${SUMMARY_INTERVAL}s"
+        log_event "SUMMARY drops=$total_drops unique_ips=$unique_ips"
+        last_summary=$now
+        reset_counters
+    fi
+done
