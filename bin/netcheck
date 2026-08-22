@@ -1,0 +1,377 @@
+#!/usr/bin/env bash
+#
+# Panoptes — the all-seeing network watch
+# https://github.com/doug445/Panoptes
+#
+# Copyright (c) 2026 William MacKinnon <spilled-bowline0j@icloud.com>
+# SPDX-License-Identifier: MIT
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+# netcheck — one-shot network security status report
+set -euo pipefail
+
+BOLD='\033[1m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+section() { echo -e "\n${BOLD}${CYAN}━━━ $1 ━━━${NC}"; }
+
+# Whois lookup — fills blank vendor/org for public IPs. Cached, skips private ranges.
+declare -A whois_cache
+whois_lookup() {
+    local ip="$1" raw out
+    [[ -z "$ip" ]] && return
+    if [[ -n "${whois_cache[$ip]+_}" ]]; then printf '%s' "${whois_cache[$ip]}"; return; fi
+    case "$ip" in
+        10.*|127.*|169.254.*|192.168.*|::1|fe80:*|fc[0-9a-fA-F]*|fd[0-9a-fA-F]*) whois_cache[$ip]=""; return ;;
+        172.1[6-9].*|172.2[0-9].*|172.3[01].*) whois_cache[$ip]=""; return ;;
+        22[4-9].*|23[0-9].*|24[0-9].*|25[0-5].*) whois_cache[$ip]=""; return ;;
+    esac
+    command -v whois &>/dev/null || { whois_cache[$ip]=""; return; }
+    raw=$(timeout 3 whois "$ip" 2>/dev/null || true)
+    out=$(printf '%s\n' "$raw" | grep -iE '^(OrgName|org-name|Organization|owner)[[:space:]]*:' | head -1 | sed 's/^[^:]*:[[:space:]]*//' | tr -d '\r')
+    [[ -z "$out" ]] && out=$(printf '%s\n' "$raw" | grep -iE '^(NetName|netname)[[:space:]]*:' | head -1 | sed 's/^[^:]*:[[:space:]]*//' | tr -d '\r')
+    whois_cache[$ip]="$out"
+    printf '%s' "$out"
+}
+
+# Firewall
+section "FIREWALL"
+zone=$(sudo firewall-cmd --get-default-zone 2>/dev/null || true)
+log_denied=$(sudo firewall-cmd --get-log-denied 2>/dev/null || true)
+if [[ "$zone" == "drop" ]]; then
+    echo -e "  Default zone: ${GREEN}${zone}${NC} (all unsolicited inbound silently dropped)"
+else
+    echo -e "  Default zone: ${RED}${zone}${NC} (consider switching to 'drop')"
+fi
+echo -e "  Log denied:   ${log_denied}"
+services=$(sudo firewall-cmd --list-services 2>/dev/null || true)
+ports=$(sudo firewall-cmd --list-ports 2>/dev/null || true)
+echo -e "  Open services: ${services:-${GREEN}none${NC}}"
+echo -e "  Open ports:    ${ports:-${GREEN}none${NC}}"
+
+# Listening ports
+section "LISTENING PORTS"
+ss -tlnp 2>/dev/null | tail -n +2 | while read -r _ _ _ local _ _ process; do
+    addr="${local%:*}"
+    port="${local##*:}"
+    if [[ "$addr" == "127.0.0.1" ]] || [[ "$addr" == "[::1]" ]] || [[ "$addr" == "127.0.0.53%lo" ]] || [[ "$addr" == "127.0.0.54" ]]; then
+        echo -e "  ${GREEN}●${NC} :${port} ${addr} (localhost only) ${process}"
+    else
+        echo -e "  ${RED}●${NC} :${port} ${addr} (network exposed!) ${process}"
+    fi
+done
+
+# WARP status
+section "WARP TUNNEL"
+if command -v warp-cli &>/dev/null; then
+    warp_status=$(warp-cli --accept-tos status 2>/dev/null | grep "Status update:" | awk '{print $3}' || true)
+    if [[ "$warp_status" == "Connected" ]]; then
+        echo -e "  Status: ${GREEN}Connected${NC}"
+        warp-cli --accept-tos tunnel stats 2>/dev/null | grep -E "Protocol|latency|loss" | sed 's/^/  /'
+        # Verify traffic actually flows through WARP
+        warp_active=$(curl -s --max-time 3 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | awk -F= '/^warp=/{print $2}' || true)
+        if [[ "$warp_active" == "on" ]]; then
+            echo -e "  Exit check: ${GREEN}warp=on${NC} (traffic is tunneled)"
+        elif [[ -n "$warp_active" ]]; then
+            echo -e "  Exit check: ${RED}warp=${warp_active}${NC} (tunnel not being used!)"
+        fi
+        split=$(warp-cli --accept-tos tunnel host list 2>/dev/null | tail -n +2 | grep -c . || true)
+        (( split > 0 )) && echo -e "  Split-tunnel exclusions: ${YELLOW}${split} host(s)${NC} (run: warp-cli tunnel host list)"
+    else
+        echo -e "  Status: ${RED}${warp_status:-Unknown}${NC}"
+    fi
+else
+    echo -e "  ${YELLOW}warp-cli not installed${NC} — install from https://pkg.cloudflareclient.com/"
+fi
+
+# DNS
+section "DNS"
+# Pull only the Global block from resolvectl (first Protocols line after Global:)
+global_block=$(resolvectl status 2>/dev/null | awk '/^Global/{flag=1; next} /^Link/{flag=0} flag' || true)
+dns_server=$(echo "$global_block" | grep "Current DNS Server" | awk '{print $NF}' || true)
+protos=$(echo "$global_block"     | grep "Protocols"          | head -1 | sed 's/^[[:space:]]*//' || true)
+
+# Configured modes (handles allow-downgrade, opportunistic, yes, no, etc.)
+dnssec_mode=$(echo "$protos" | grep -oE 'DNSSEC=[^ ]+'    | sed 's/DNSSEC=//'    || true)
+dot_mode=$(   echo "$protos" | grep -oE 'DNSOverTLS=[^ ]+' | sed 's/DNSOverTLS=//' || true)
+
+echo -e "  Current server: ${dns_server:-${RED}unknown${NC}}"
+echo -e "  Configured:     DNSSEC=${dnssec_mode:-?}  DNSOverTLS=${dot_mode:-?}"
+
+# ── Live DNSSEC validation test ───────────────────────────────────────────
+# Bogus signature should SERVFAIL; signed zone should return AD flag.
+if command -v dig &>/dev/null; then
+    bogus_status=$(dig +time=3 +tries=1 @127.0.0.53 dnssec-failed.org A 2>/dev/null \
+                    | grep -oP 'status: \K[A-Z]+' | head -1 || true)
+    signed_resp=$(dig +time=3 +tries=1 @127.0.0.53 internetsociety.org A 2>/dev/null || true)
+    signed_status=$(echo "$signed_resp" | grep -oP 'status: \K[A-Z]+' | head -1 || true)
+    signed_ad=0
+    if echo "$signed_resp" | grep -E '^;; flags:' | head -1 | grep -qE '(^|[[:space:]])ad([[:space:]]|;)'; then
+        signed_ad=1
+    fi
+
+    if [[ "$bogus_status" == "SERVFAIL" ]] && (( signed_ad )); then
+        echo -e "  ${GREEN}●${NC} DNSSEC: ${GREEN}validated live${NC} (bogus→SERVFAIL, signed→AD)"
+    elif [[ "$bogus_status" == "SERVFAIL" ]]; then
+        echo -e "  ${YELLOW}●${NC} DNSSEC: rejects bogus, but no AD on signed (signed status=${signed_status:-?})"
+    elif (( signed_ad )); then
+        echo -e "  ${YELLOW}●${NC} DNSSEC: AD on signed, but bogus resolved (incomplete validation)"
+    elif [[ -z "$bogus_status" && -z "$signed_status" ]]; then
+        echo -e "  ${YELLOW}●${NC} DNSSEC: live test inconclusive (no answer from 127.0.0.53)"
+    else
+        echo -e "  ${RED}●${NC} DNSSEC: ${RED}NOT validating${NC} (bogus=${bogus_status:-?}, signed_AD=${signed_ad})"
+    fi
+else
+    echo -e "  ${YELLOW}●${NC} DNSSEC live test: dig not installed"
+fi
+
+# ── Live DNSOverTLS verification ──────────────────────────────────────────
+# Force a fresh upstream lookup, then look for an established TCP :853 socket
+# owned by systemd-resolve (proves the wire is actually TLS, not :53 plaintext).
+if command -v ss &>/dev/null; then
+    resolvectl flush-caches 2>/dev/null || true
+    # Two unlikely-cached queries to provoke a real upstream round-trip.
+    dig +time=2 +tries=1 @127.0.0.53 "rand-${RANDOM}-$(date +%s).example.org" >/dev/null 2>&1 || true
+    dig +time=2 +tries=1 @127.0.0.53 cloudflare.com                          >/dev/null 2>&1 || true
+    sleep 0.4
+
+    resolved_tcp=$(sudo ss -Hnpt state established 2>/dev/null | grep -F 'systemd-resolve' || true)
+    dot_count=$(  echo "$resolved_tcp" | awk 'NF && $4 ~ /:853$/' | wc -l)
+    plain_count=$(echo "$resolved_tcp" | awk 'NF && $4 ~ /:53$/'  | wc -l)
+
+    # Try to identify the TLS peer (e.g. 94.140.14.14:853)
+    dot_peer=$(echo "$resolved_tcp" | awk '$4 ~ /:853$/ {print $4; exit}')
+
+    if (( dot_count > 0 )) && (( plain_count == 0 )); then
+        echo -e "  ${GREEN}●${NC} DNSOverTLS: ${GREEN}active${NC} (${dot_count} TLS conn → ${dot_peer:-:853}, no plaintext :53)"
+    elif (( dot_count > 0 )); then
+        echo -e "  ${YELLOW}●${NC} DNSOverTLS: TLS active to ${dot_peer:-:853} but ALSO ${plain_count} plaintext :53 conn"
+    elif [[ "$dot_mode" == "opportunistic" ]]; then
+        echo -e "  ${YELLOW}●${NC} DNSOverTLS: no live TLS socket (opportunistic mode — likely downgraded to :53)"
+    else
+        echo -e "  ${RED}●${NC} DNSOverTLS: ${RED}no live TLS connection${NC} (plaintext :53 conn=${plain_count})"
+    fi
+fi
+
+# Static link-local protections from resolvectl
+if [[ -n "$protos" ]]; then
+    [[ "$protos" == *"-LLMNR"* ]]  && echo -e "  ${GREEN}●${NC} LLMNR: disabled"  || echo -e "  ${YELLOW}●${NC} LLMNR: enabled"
+    [[ "$protos" == *"-mDNS"* ]]   && echo -e "  ${GREEN}●${NC} mDNS: disabled"   || echo -e "  ${YELLOW}●${NC} mDNS: enabled"
+fi
+
+# Wi-Fi adapters: link details + MAC randomization status
+section "WI-FI ADAPTERS"
+nm_conf="/etc/NetworkManager/conf.d/mac-randomization.conf"
+mapfile -t wifi_ifaces < <(nmcli -t -f DEVICE,TYPE device 2>/dev/null | awk -F: '$2=="wifi"{print $1}')
+if [[ ${#wifi_ifaces[@]} -eq 0 ]]; then
+    echo -e "  (no Wi-Fi adapters found)"
+fi
+first_wifi=1
+for wifi_iface in "${wifi_ifaces[@]}"; do
+    [[ -z "$wifi_iface" ]] && continue
+    (( first_wifi )) || echo
+    first_wifi=0
+
+    echo -e "  ${BOLD}Interface: ${wifi_iface}${NC}"
+
+    iw_info=$(iw dev "$wifi_iface" info 2>/dev/null || true)
+    iw_link=$(iw dev "$wifi_iface" link 2>/dev/null || true)
+
+    nm_state=$(nmcli -t -f DEVICE,STATE,CONNECTION device 2>/dev/null | awk -F: -v d="$wifi_iface" '$1==d{print $2"|"$3; exit}')
+    nm_status="${nm_state%|*}"
+    nm_conn="${nm_state#*|}"
+
+    if [[ "$iw_link" == "Not connected." || -z "$iw_link" ]]; then
+        echo -e "  Status: ${YELLOW}Not connected${NC}${nm_status:+ (NM: ${nm_status})}"
+    else
+        ssid=$(awk -F': ' '/^\tSSID:/{print $2; exit}' <<<"$iw_link")
+        freq=$(awk '/^\tfreq:/{print $2; exit}' <<<"$iw_link")
+        signal=$(awk '/^\tsignal:/{print $2" "$3; exit}' <<<"$iw_link")
+        rx_rate=$(awk -F': ' '/rx bitrate:/{print $2; exit}' <<<"$iw_link")
+        tx_rate=$(awk -F': ' '/tx bitrate:/{print $2; exit}' <<<"$iw_link")
+
+        ch_line=$(awk -F'[(),:]' '/^\tchannel /{print; exit}' <<<"$iw_info")
+        channel=$(awk '/^\tchannel /{print $2; exit}' <<<"$iw_info")
+        width=$(awk -F'width: ' '/width:/{print $2; exit}' <<<"$iw_info" | awk -F',' '{print $1}')
+
+        # Band from freq
+        band="?"
+        if [[ -n "$freq" ]]; then
+            f=${freq%.*}
+            if   (( f >= 2400 && f < 2500 )); then band="2.4 GHz"
+            elif (( f >= 5000 && f < 5900 )); then band="5 GHz"
+            elif (( f >= 5925 && f < 7200 )); then band="6 GHz"
+            fi
+        fi
+
+        # Protocol — prefer markers in bitrate strings (most precise), fall back to band
+        proto=""
+        rates_combined="${rx_rate} ${tx_rate}"
+        if   [[ "$rates_combined" == *EHT-MCS* ]]; then proto="802.11be (Wi-Fi 7)"
+        elif [[ "$rates_combined" == *HE-MCS*  ]]; then proto="802.11ax (Wi-Fi 6/6E)"
+        elif [[ "$rates_combined" == *VHT-MCS* ]]; then proto="802.11ac (Wi-Fi 5)"
+        elif [[ "$rates_combined" == *MCS*     ]]; then proto="802.11n (Wi-Fi 4)"
+        elif [[ "$band" == "2.4 GHz" ]];          then proto="802.11g/b"
+        elif [[ "$band" == "5 GHz"   ]];          then proto="802.11a"
+        fi
+
+        echo -e "  Status: ${GREEN}Connected${NC}${nm_conn:+ → ${BOLD}${nm_conn}${NC}}"
+        [[ -n "$ssid"    ]] && echo -e "  SSID: ${BOLD}${ssid}${NC}"
+        [[ -n "$band"    ]] && echo -e "  Band: ${band}"
+        [[ -n "$channel" ]] && echo -e "  Channel: ${channel}${width:+  Width: ${width}}"
+        [[ -n "$freq"    ]] && echo -e "  Frequency: ${freq} MHz"
+        [[ -n "$proto"   ]] && echo -e "  Protocol: ${proto}"
+        [[ -n "$signal"  ]] && echo -e "  Signal: ${signal}"
+        [[ -n "$rx_rate" ]] && echo -e "  RX bitrate: ${rx_rate}"
+        [[ -n "$tx_rate" ]] && echo -e "  TX bitrate: ${tx_rate}"
+    fi
+
+    current_mac=$(ip link show "$wifi_iface" 2>/dev/null | awk '/link\/ether/{print $2; exit}' || true)
+    perm_mac=$(ip link show "$wifi_iface" 2>/dev/null | awk -F'permaddr ' 'NF>1{print $2; exit}' | awk '{print $1}' || true)
+    [[ -n "$current_mac" ]] && echo -e "  Current MAC: ${BOLD}${current_mac}${NC}"
+    [[ -n "$perm_mac"    ]] && echo -e "  Hardware MAC: ${perm_mac}"
+
+    if [[ -n "$perm_mac" ]] && [[ "$current_mac" != "$perm_mac" ]]; then
+        echo -e "  MAC privacy: ${GREEN}Randomized${NC} (current differs from hardware)"
+    elif [[ -n "$current_mac" ]]; then
+        first_octet=$(echo "$current_mac" | cut -d: -f1)
+        first_dec=$((16#${first_octet}))
+        if (( first_dec & 0x02 )); then
+            echo -e "  MAC privacy: ${GREEN}Locally administered${NC} (MAC is random)"
+        else
+            echo -e "  MAC privacy: ${RED}Hardware MAC exposed${NC}"
+        fi
+    fi
+done
+if [[ ${#wifi_ifaces[@]} -gt 0 && -f "$nm_conf" ]]; then
+    echo -e "\n  Config: ${GREEN}${nm_conf}${NC}"
+fi
+
+# ARP table — prefer arp-scan (active scan + vendor lookup) over passive ip neigh
+section "ARP TABLE"
+gateway_ip=$(ip route show default 2>/dev/null | awk '/default/{print $3; exit}' || true)
+
+arp_output=""
+if command -v arp-scan &>/dev/null; then
+    arp_output=$(sudo arp-scan --localnet --ignoredups 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | sort -V || true)
+fi
+
+if [[ -n "$arp_output" ]]; then
+    while IFS=$'\t' read -r ip mac vendor; do
+        if [[ -z "$vendor" || "$vendor" == "(Unknown)" ]]; then
+            w=$(whois_lookup "$ip")
+            [[ -n "$w" ]] && vendor="$w"
+        fi
+        if [[ "$ip" == "$gateway_ip" ]]; then
+            echo -e "  ${BOLD}${ip}${NC}\t${mac}\t${vendor:-(unknown)} ${YELLOW}(gateway)${NC}"
+        else
+            echo -e "  ${ip}\t${mac}\t${vendor:-(unknown)}"
+        fi
+    done <<< "$arp_output"
+else
+    # Fallback: passive kernel neighbor table
+    ip neigh show 2>/dev/null | while read -r ip _ _ _ mac state; do
+        if [[ "$ip" == "$gateway_ip" ]]; then
+            echo -e "  ${BOLD}${ip}${NC} ${mac} (gateway) [${state}]"
+        else
+            echo -e "  ${ip} ${mac} [${state}]"
+        fi
+    done
+fi
+
+# Recent drops
+section "RECENT FIREWALL DROPS (last 5 min)"
+drops=$(journalctl -k --since "5 min ago" --no-pager 2>/dev/null | grep -c "_DROP" || true)
+if (( drops > 0 )); then
+    echo -e "  ${YELLOW}${drops} packets dropped${NC}"
+    while read -r line; do
+        src=$(echo "$line" | grep -oP 'SRC=\K[0-9a-fA-F.:]+' || echo "?")
+        proto=$(echo "$line" | grep -oP 'PROTO=\K\w+' || echo "?")
+        dpt=$(echo "$line" | grep -oP 'DPT=\K\d+' || echo "?")
+        org=$(whois_lookup "$src")
+        echo -e "    ${src} → :${dpt} (${proto})${org:+ ${YELLOW}[${org}]${NC}}"
+    done < <(journalctl -k --since "5 min ago" --no-pager 2>/dev/null | grep "_DROP" | grep -v "DST=255.255.255.255" | grep -v "DST=224." | grep -v "DPT=5353" | tail -5)
+else
+    echo -e "  ${GREEN}No drops — quiet network${NC}"
+fi
+
+# Top drop sources (from netwatch log, with MAC+vendor)
+section "TOP DROP SOURCES (netwatch log)"
+NW_LOG="${HOME}/.local/share/netwatch/events.log"
+OUI=/usr/share/hwdata/oui.txt
+if [[ -r "$NW_LOG" ]] && grep -q DROP "$NW_LOG" 2>/dev/null; then
+    declare -A lan_mac lan_vendor
+    if command -v arp-scan &>/dev/null; then
+        while IFS=$'\t' read -r sip smac svendor; do
+            [[ -n "$sip" ]] || continue
+            lan_mac[$sip]="$smac"
+            lan_vendor[$sip]="$svendor"
+        done < <(sudo arp-scan --localnet --ignoredups 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' || true)
+    fi
+    while read -r count ip; do
+        mac="${lan_mac[$ip]:-}"
+        vendor="${lan_vendor[$ip]:-}"
+        if [[ -z "$mac" ]]; then
+            mac=$(ip neigh show "$ip" 2>/dev/null | grep -oP 'lladdr \K[a-f0-9:]+' | head -1 || true)
+        fi
+        if [[ -z "$vendor" && -n "$mac" && -r "$OUI" ]]; then
+            prefix=$(echo "${mac:0:8}" | tr -d : | tr 'a-f' 'A-F')
+            vendor=$(grep "^$prefix" "$OUI" 2>/dev/null | head -1 | sed 's/^[0-9A-F]*\s*(base 16)\s*//' | tr -d '\r' || true)
+        fi
+        if [[ -z "$vendor" ]]; then
+            vendor=$(whois_lookup "$ip")
+        fi
+        host=$(getent hosts "$ip" 2>/dev/null | awk '{print $2}' || true)
+        printf "  %6s  %-15s  %-18s  %-28s  %s\n" "$count" "$ip" "${mac:--}" "${vendor:--}" "${host:-}"
+    done < <(grep DROP "$NW_LOG" | awk -F'src=' 'NF>1{print $2}' | awk '{print $1}' | sort | uniq -c | sort -rn | head -10)
+else
+    echo -e "  ${GREEN}No drops in netwatch log${NC}"
+fi
+
+# NetWatch service
+section "NETWATCH MONITOR"
+if systemctl --user is-active netwatch.service &>/dev/null; then
+    echo -e "  ${GREEN}Running${NC}"
+    if [[ -f "${HOME}/.local/share/netwatch/events.log" ]]; then
+        events=$(wc -l < "${HOME}/.local/share/netwatch/events.log")
+        echo -e "  ${events} events logged"
+        tail -3 "${HOME}/.local/share/netwatch/events.log" | sed 's/^/  /'
+    fi
+else
+    echo -e "  ${RED}Not running${NC} — start with: systemctl --user start netwatch"
+fi
+
+# IP addresses
+section "IP ADDRESSES"
+ip -brief addr 2>/dev/null | while read -r iface state addrs; do
+    [[ "$iface" == "lo" ]] && continue
+    case "$state" in
+        UP)      color="${GREEN}" ;;
+        DOWN)    color="${RED}" ;;
+        *)       color="${YELLOW}" ;;
+    esac
+    printf "  ${color}●${NC} ${BOLD}%-16s${NC} ${color}%-8s${NC}  %s\n" "$iface" "$state" "$addrs"
+done
+
+echo ""
