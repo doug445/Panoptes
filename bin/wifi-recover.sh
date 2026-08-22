@@ -55,7 +55,7 @@ for a in "$@"; do
   esac
 done
 if [[ $HELP -eq 1 ]]; then
-  sed -n '2,12p' "$0"; exit 0
+  sed -n '/^# wifi-recover —/,/^$/p' "$0" | sed 's/^# \?//'; exit 0
 fi
 
 # -------- elevate --------------------------------------------------------
@@ -420,7 +420,7 @@ if [[ $DO_REPAIR -eq 1 ]]; then
   fi
 
   section "[J] verify"
-  for i in $(seq 1 15); do
+  for _ in $(seq 1 15); do
     if [[ -n "$IFACE" ]] && iw dev "$IFACE" link 2>/dev/null | grep -q "^Connected to"; then
       note "associated"
       break

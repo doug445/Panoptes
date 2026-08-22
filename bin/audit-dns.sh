@@ -94,7 +94,7 @@ if have nmcli && systemctl is-active --quiet NetworkManager 2>/dev/null; then
   # Per-connection ignore-auto-dns
   if nmcli -t -f NAME,TYPE connection show 2>/dev/null | grep -qv '^$'; then
     note "  per-connection ipv4.ignore-auto-dns / ipv6.ignore-auto-dns:"
-    while IFS=: read -r name type; do
+    while IFS=: read -r name _; do
       [ -z "$name" ] && continue
       # nmcli can return multiple lines for profiles with several address blocks; normalize.
       v4=$(nmcli -g ipv4.ignore-auto-dns connection show "$name" 2>/dev/null | tr '\n' ',' | sed 's/,*$//;s/,,*/,/g')
@@ -125,7 +125,8 @@ hr
 
 # --- 5. dhclient -----------------------------------------------------------
 bold "dhclient (ISC) DNS handling"
-if have dhclient || ls /etc/dhcp/dhclient.conf /etc/dhcp/dhclient.d/*.sh 2>/dev/null | grep -q .; then
+if have dhclient || [ -e /etc/dhcp/dhclient.conf ] || \
+   ( for _f in /etc/dhcp/dhclient.d/*.sh; do [ -e "$_f" ] && exit 0; done; exit 1 ); then
   any_override=0
   for f in /etc/dhcp/dhclient.conf /etc/dhcp/dhclient.d/*.sh; do
     [ -f "$f" ] || continue

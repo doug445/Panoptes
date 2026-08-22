@@ -211,7 +211,6 @@ for wifi_iface in "${wifi_ifaces[@]}"; do
         rx_rate=$(awk -F': ' '/rx bitrate:/{print $2; exit}' <<<"$iw_link")
         tx_rate=$(awk -F': ' '/tx bitrate:/{print $2; exit}' <<<"$iw_link")
 
-        ch_line=$(awk -F'[(),:]' '/^\tchannel /{print; exit}' <<<"$iw_info")
         channel=$(awk '/^\tchannel /{print $2; exit}' <<<"$iw_info")
         width=$(awk -F'width: ' '/width:/{print $2; exit}' <<<"$iw_info" | awk -F',' '{print $1}')
 
