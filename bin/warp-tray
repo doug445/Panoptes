@@ -25,8 +25,8 @@
 # SOFTWARE.
 #
 import os
-import sys
 import subprocess
+import sys
 
 # Daemonize: detach from terminal so closing the shell doesn't kill the tray
 if os.fork() > 0:
@@ -35,7 +35,11 @@ os.setsid()
 
 # Single-instance guard: if a tray is already running, exit (prevents duplicate icons).
 import fcntl
-_lock_fp = open(f"/run/user/{os.getuid()}/warp-tray.lock", "w")
+
+# Held open deliberately for the lifetime of the process: closing this file
+# releases the flock and defeats the single-instance guard. Do not convert
+# this to a `with` block.
+_lock_fp = open(f"/run/user/{os.getuid()}/warp-tray.lock", "w")  # noqa: SIM115
 try:
     fcntl.flock(_lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except OSError:
@@ -47,9 +51,11 @@ KILL_MARKER = '/etc/systemd/resolved.conf.warpkill-bak'
 
 def check_status():
     try:
-        res = subprocess.run(['warp-cli', '--accept-tos', 'status'], capture_output=True, text=True)
+        res = subprocess.run(['warp-cli', '--accept-tos', 'status'],
+                             capture_output=True, text=True, check=False)
         return "Connected" in res.stdout
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
+        # OSError: warp-cli not installed. SubprocessError: it misbehaved.
         return False
 
 
@@ -78,9 +84,9 @@ desktop = os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
 
 if 'kde' in desktop:
     # --- KDE PLASMA (QT6) ---
-    from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
-    from PyQt6.QtGui import QIcon, QAction
     from PyQt6.QtCore import QTimer
+    from PyQt6.QtGui import QAction, QIcon
+    from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
     def toggle(reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
@@ -133,7 +139,7 @@ elif 'cinnamon' in desktop or 'x-cinnamon' in desktop:
     import gi
     gi.require_version('Gtk', '3.0')
     gi.require_version('XApp', '1.0')
-    from gi.repository import Gtk, XApp, GLib
+    from gi.repository import GLib, Gtk, XApp
 
     def on_click(icon, x, y, button, time, panel_position):
         if button != 1:
