@@ -49,7 +49,7 @@ for arg in "$@"; do
     --dry-run|-n)    DRY_RUN=1 ;;
     --skip-nm)       SKIP_NM=1 ;;
     --skip-resolved) SKIP_RESOLVED=1 ;;
-    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+    -h|--help) sed -n '/^# harden-dns\.sh —/,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
     *) echo "unknown arg: $arg" >&2; exit 1 ;;
   esac
 done

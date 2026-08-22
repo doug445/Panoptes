@@ -154,8 +154,7 @@ warp_up() {
     systemctl restart systemd-resolved >/dev/null 2>&1
     systemctl enable warp-svc >/dev/null 2>&1
     systemctl start  warp-svc >/dev/null 2>&1
-    local i
-    for i in 1 2 3 4 5 6 7 8; do
+    for _ in 1 2 3 4 5 6 7 8; do
         warp-cli --accept-tos status >/dev/null 2>&1 && break
         sleep 1
     done
