@@ -71,7 +71,7 @@ Nothing installs a service or changes your system until you ask it to.
 | Tool | What it does |
 |------|--------------|
 | **`netwatch`** | Watches **firewalld** dropped packets, new inbound connections and **ARP anomalies**, and raises desktop notifications. Runs as a systemd service; resolves D-Bus so `notify-send` works from a unit. |
-| **`probesource`** | **The centrepiece.** Investigate any address — a firewall drop, a probe, a live connection. Pick a target from the UFW journal, the `netwatch` log, the live `ss` table, or type one in. Then run a single tactic, a one-pass sweep, or a relentless escalating sweep. Passive tactics: `whois`, reverse DNS, GeoIP, journal and `netwatch` history, neighbour table and OUI lookup, live socket state, conntrack, ipset membership, short `tcpdump`/`tshark` capture, and a `p0f` fingerprint listener. |
+| **`probesource`** | **The centrepiece.** Investigate any address — a firewall drop, a probe, a live connection. Pass one in as `probesource <ip>`, or pick a target from the UFW journal, the `netwatch` log, the live `ss` table, or type one in. Then run a single tactic, a one-pass sweep, or a relentless escalating sweep. Passive tactics: `whois`, reverse DNS, GeoIP, journal and `netwatch` history, neighbour table and OUI lookup, live socket state, conntrack, ipset membership, short `tcpdump`/`tshark` capture, and a `p0f` fingerprint listener. |
 | **`nettop`** | Lists hosts on the LAN and WAN with vendor attribution — active `arp-scan` for the LAN, falling back to `ip neigh` plus OUI lookup, with `whois` filling in vendor for public addresses. |
 | **`netcheck`** | Full network status readout: every interface, Wi-Fi SSID, band, channel, frequency, protocol and bitrate for each adapter, firewall state, and cached `whois` for public addresses (private ranges are skipped). |
 
@@ -157,6 +157,15 @@ false failure.
 table and it runs up to eleven investigative tactics, from `whois` and GeoIP
 through conntrack state to a live `tcpdump` capture and a `p0f` fingerprint
 listener — escalating from entirely passive to active only as you allow.
+
+If you already know the address, pass it straight in and skip the picker:
+
+```bash
+probesource 203.0.113.42        # IPv4 or IPv6
+```
+
+You still choose the investigation mode, so nothing is sent to the target
+until you pick one — `All passive` never emits a packet to it at all.
 
 ### Cloudflare WARP broke my internet. How do I get out?
 
