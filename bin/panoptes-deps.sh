@@ -40,7 +40,7 @@
 #        ./panoptes-deps.sh --list         show the full requirement table
 #        ./panoptes-deps.sh --dry-run      resolve and report, run no package manager
 #
-# Groups: core dns firewall investigate tray build
+# Groups: core dns firewall investigate tray build warp
 # Optional requirements are skipped unless --with-optional is given.
 
 set -uo pipefail
@@ -103,10 +103,11 @@ zlib-dev|pc:zlib|build|no|zlib-devel|zlib1g-dev|zlib|zlib-devel|zlib-dev
 nghttp2-dev|pc:libnghttp2|build|no|libnghttp2-devel|libnghttp2-dev|libnghttp2|libnghttp2-devel|nghttp2-dev
 idn2-dev|pc:libidn2|build|no|libidn2-devel|libidn2-dev|libidn2|libidn2-devel|libidn2-dev
 psl-dev|pc:libpsl|build|no|libpsl-devel|libpsl-dev|libpsl|libpsl-devel|libpsl-dev
+warp-cli|cmd:warp-cli|warp|yes|-|-|-|-|-
 TABLE
 )
 
-ALL_GROUPS="core dns firewall investigate tray build"
+ALL_GROUPS="core dns firewall investigate tray build warp"
 
 # ------------------------------------------------------------------- arguments
 CHECK_ONLY=0; ASSUME_YES=0; DRY=0; PRINT_ONLY=0; LIST=0; WITH_OPTIONAL=0
@@ -234,8 +235,16 @@ while IFS='|' read -r id probe group opt fed deb arc sus alp; do
     esac
     if [ "$pkg" = '-' ] || [ -z "$pkg" ]; then
         UNPACKAGED="$UNPACKAGED $id"
-        printf '  %s!%s %-14s %snot packaged for %s — install it yourself%s\n' \
-            "$Y" "$N" "$id" "$Y" "$FAMILY" "$N"
+        # A few requirements are not in anyone's repositories. Where the suite
+        # ships a tool that can install one, say so rather than shrugging.
+        case "$id" in
+            warp-cli)
+                printf '  %s!%s %-14s %sno distro packages WARP — run: warp-setup.sh%s\n' \
+                    "$Y" "$N" "$id" "$Y" "$N" ;;
+            *)
+                printf '  %s!%s %-14s %snot packaged for %s — install it yourself%s\n' \
+                    "$Y" "$N" "$id" "$Y" "$FAMILY" "$N" ;;
+        esac
         continue
     fi
     MISSING_IDS="$MISSING_IDS $id"
