@@ -51,6 +51,42 @@ dependencies.
   the site's HTTPS DNS record over a protected channel to learn the ECH key, and
   Firefox will not attempt ECH at all with TRR off. Both are set together.
 
+## [2.3.0] — 2026-08-23
+
+The suite shipped two tools for controlling WARP and no way to get it. Now it
+installs it.
+
+### Added
+
+- **`warp-setup.sh`** — installs and activates Cloudflare WARP. No distribution
+  packages it, so this adds Cloudflare's own repository (an RPM repo file with
+  `gpgcheck=1`, or an APT list with a dearmoured keyring in
+  `/usr/share/keyrings`), installs the client, registers the device and
+  connects. Fedora/RHEL and Debian/Ubuntu, which is what Cloudflare publishes
+  for; Arch is told to use the AUR build and re-run with `--register`.
+
+  It sets `tunnel_only` mode by default, deliberately. WARP's other modes proxy
+  DNS themselves, which fights everything else here — `harden-dns.sh` pins
+  DNSSEC and DoT in `systemd-resolved`, `dns-toggle` switches the resolver
+  underneath it, and `checkdns` audits the result. `tunnel_only` carries traffic
+  and leaves resolution alone, so the two stop arguing. `--mode` overrides it.
+
+  Registration asks first, because it creates a device record on Cloudflare's
+  side. `--check` reports state, `--uninstall` removes the client and the
+  repository, and it flushes the resolver after connecting for the same reason
+  `warp-tray` does.
+
+- **`panoptes-deps.sh` now knows about `warp-cli`**, in a new `warp` group. It
+  is the one requirement no distribution ships, so instead of staying silent it
+  reports "no distro packages WARP — run: warp-setup.sh".
+
+### Clarified
+
+- README: **AdGuard needs no installation.** It is a public resolver
+  (`94.140.14.14` / `94.140.15.15` over DoT), not software — the DNS tools just
+  point `systemd-resolved` at it. WARP was the only component that runs a local
+  daemon and therefore had to be installed, which is why it was the only gap.
+
 ## [2.2.1] — 2026-08-23
 
 ### Changed
@@ -177,6 +213,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[2.3.0]: https://github.com/doug445/Panoptes/releases/tag/v2.3.0
 [2.2.1]: https://github.com/doug445/Panoptes/releases/tag/v2.2.1
 [2.2.0]: https://github.com/doug445/Panoptes/releases/tag/v2.2.0
 [2.1.0]: https://github.com/doug445/Panoptes/releases/tag/v2.1.0
