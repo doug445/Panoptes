@@ -61,8 +61,29 @@ guard exists precisely to catch a bad `--force` from you or from tooling.
 Nothing is locked: as an admin you can set a ruleset to `disabled`, do the
 thing, and set it back.
 
+Send the **whole** ruleset body, not just the changed field — `PUT` replaces the
+ruleset, so a partial update silently drops the rules:
+
 ```bash
-gh api --method PUT repos/OWNER/REPO/rulesets/RULESET_ID -f enforcement=disabled
-# ... force-push ...
-gh api --method PUT repos/OWNER/REPO/rulesets/RULESET_ID -f enforcement=active
+ID=$(gh api repos/OWNER/REPO/rulesets --jq '.[] | select(.name=="release tags") | .id')
+
+jq '.enforcement = "disabled"' .github/rulesets/tags-release.json > /tmp/off.json
+gh api --method PUT "repos/OWNER/REPO/rulesets/$ID" --input /tmp/off.json
+
+# ... do the thing ...
+
+gh api --method PUT "repos/OWNER/REPO/rulesets/$ID" --input .github/rulesets/tags-release.json
 ```
+
+Confirm the rules survived, every time:
+
+```bash
+gh api "repos/OWNER/REPO/rulesets/$ID" --jq '.enforcement, (.rules|map(.type))'
+```
+
+## Verified, not assumed
+
+Tested on this repository on 2026-08-23: pushing a new `v*` tag succeeded,
+deleting it was rejected with `GH013: Repository rule violations found`, and an
+ordinary fast-forward push to `main` was unaffected. The disable/re-enable cycle
+above is how that test tag was then removed.
