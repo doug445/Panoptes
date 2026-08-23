@@ -1,0 +1,113 @@
+name: Bug report
+description: A tool did the wrong thing, or did nothing
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **"DNS broke" is rarely enough to act on.** These tools rewrite resolver
+        configuration, firewall state and live network devices — the fields below
+        are what makes a report reproducible.
+
+        Before you paste anything: Panoptes output is network output. `nettop`,
+        `netcheck` and `probesource` print MAC addresses, SSIDs and your public
+        address, and the `pcap`/`tshark`/`p0f` tactics capture live traffic.
+        Redact down to what the bug needs.
+
+  - type: dropdown
+    id: tool
+    attributes:
+      label: Which tool
+      options:
+        - audit-dns.sh
+        - harden-dns.sh
+        - checkdns
+        - dns-toggle
+        - dns-status.sh
+        - dns-tray
+        - netwatch
+        - probesource
+        - nettop
+        - netcheck
+        - netmaster
+        - wifi-recover.sh
+        - warp-killswitch
+        - warp-tray
+        - install.sh / uninstall.sh
+        - more than one, or not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: The exact command you ran
+      description: >
+        Full command line including flags and any environment overrides.
+        `harden-dns.sh` takes policy from `PRIMARY_DNS`, `FALLBACK_DNS`,
+        `DOMAINS`, `DNSSEC_MODE` and `DOT_MODE` — if you set any, include them.
+        A default-policy bug and an override bug have different causes.
+      placeholder: sudo DNSSEC_MODE=allow-downgrade ./bin/harden-dns.sh --dry-run
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+      description: Paste the output verbatim rather than describing it.
+    validations:
+      required: true
+
+  - type: input
+    id: distro
+    attributes:
+      label: Distribution and version
+      description: >
+        A distribution not listed in the README should still work — if it does
+        not, that is worth reporting, so say which one.
+      placeholder: "Fedora 41 / EndeavourOS 2025.03 / Debian 13 …"
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: Panoptes commit
+      description: "`git rev-parse --short HEAD` from your checkout."
+      placeholder: eda8520
+    validations:
+      required: true
+
+  - type: textarea
+    id: bundle
+    attributes:
+      label: Diagnostic bundle
+      description: >
+        Run the read-only bundle from CONTRIBUTING.md and attach the file, or
+        paste it here. It collects state and changes nothing. **Read it before
+        you attach it.**
+      render: text
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: >
+        For `probesource`, say which tactic and whether you reached it from the
+        journal, the netwatch log, the `ss` table or by typing an address — the
+        input path matters more than the tactic. Do not attach a capture you
+        have not read.
+
+  - type: checkboxes
+    id: confirms
+    attributes:
+      label: Before submitting
+      options:
+        - label: I am on current `main`, or I have said which commit above.
+          required: true
+        - label: I have read what I am pasting and redacted what the bug does not need.
+          required: true
+        - label: This is not a security vulnerability. Those go to the address in SECURITY.md.
+          required: true
