@@ -1,0 +1,49 @@
+name: Tool or feature request
+description: Something the suite should do and does not
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every tool here was written after a real failure that took hours to
+        diagnose by hand. The most useful requests describe the outage, not the
+        feature — what went wrong, and what you had to do by hand to find it.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What were you trying to diagnose or fix, and what was missing?
+    validations:
+      required: true
+
+  - type: textarea
+    id: manual
+    attributes:
+      label: What you did by hand instead
+      description: >
+        The commands you ended up running. This is usually most of the tool.
+      render: shell
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which area
+      options:
+        - DNS — auditing, hardening, leak prevention
+        - Monitoring and investigation
+        - Repair and control
+        - Packaging / install
+        - New area
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints this project holds to
+      description: Confirm the request fits these, or say in the box above why it should not.
+      options:
+        - label: It does not require a package manager or a specific distribution.
+        - label: A read-only tool stays read-only; anything that writes says so and supports `--dry-run`.
+        - label: Resolver choices stay overridable rather than hardcoded.
