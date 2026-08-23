@@ -149,11 +149,20 @@ TABLE
 # Proxy-routed browsers. Present so the report accounts for them, never edited.
 SKIP_ROOTS=$(cat <<'TABLE'
 Tor Browser|tor-browser/Browser/TorBrowser/Data/Browser
+Tor Browser|Applications/tor-browser/Browser/TorBrowser/Data/Browser
+Tor Browser|.local/share/torbrowser/tbb
 Tor Browser (Flatpak)|.var/app/org.torproject.torbrowser-launcher/.local/share/torbrowser
 Mullvad Browser|.mullvad-browser
+Mullvad Browser|mullvad-browser/Data
+Mullvad Browser|Applications/mullvad-browser/Data
 Mullvad Browser (Flatpak)|.var/app/net.mullvad.MullvadBrowser/.mullvad-browser
 TABLE
 )
+
+# Both ship as tarballs that can be unpacked anywhere, so the paths above are
+# the common ones, not a guarantee of discovery. Safety does not rest on this
+# list: BROWSERS above is an allowlist, so a profile it does not name is never
+# written to. This table exists so the report can say so out loud.
 
 # ------------------------------------------------------------------- utilities
 installed() {  # $1 = profile root. Is the app that owns it actually still here?
@@ -186,8 +195,47 @@ gecko_profiles() {  # $1 = root -> one absolute profile path per line
     fi
 }
 
-gecko_running() { [ -L "$1/lock" ] || [ -L "$1/.parentlock" ]; }
-chromium_running() { [ -e "$1/SingletonLock" ]; }
+# Lock files are weak evidence. A crash leaves one behind, and a Flatpak or Snap
+# browser records its *sandbox* pid, which never matches a host pid. The strong
+# evidence is an open file descriptor under the profile: a running browser always
+# holds several, and the host /proc sees sandboxed processes just the same.
+# Deliberately not piped into grep: -quit makes find exit the moment it prints,
+# grep -q closes the pipe first, find takes SIGPIPE and exits 141, and pipefail
+# then reports the whole pipeline as failed. Command substitution has no pipe.
+profile_in_use() {
+    local hit
+    hit=$(find /proc -mindepth 3 -maxdepth 3 -path '/proc/[0-9]*/fd/*' \
+               -lname "$1/*" -print -quit 2>/dev/null)
+    [ -n "$hit" ]
+}
+
+# A dangling symlink fails -e, because -e follows it. Both browsers point their
+# lock at a name that is not a real path, so -L is the only test that sees them.
+lock_pid_alive() {  # $1 = lock path, $2 = separator before the pid
+    local target pid
+    [ -L "$1" ] || return 1
+    target=$(readlink "$1" 2>/dev/null) || return 1
+    pid=${target##*"$2"}
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null
+}
+
+# A sandboxed browser records its namespace pid, which on the host is some
+# unrelated process — Flatpak gecko profiles here hold a stale lock naming pid 2,
+# and pid 2 is kthreadd, which is always alive. Never test those against host
+# pids; the descriptor scan is the only evidence that means anything for them.
+sandboxed() { case "$1" in */.var/app/*|*/snap/*) return 0 ;; *) return 1 ;; esac; }
+
+gecko_running() {
+    profile_in_use "$1" && return 0
+    sandboxed "$1" && return 1
+    lock_pid_alive "$1/lock" '+'
+}
+chromium_running() {
+    profile_in_use "$1" && return 0
+    sandboxed "$1" && return 1
+    lock_pid_alive "$1/SingletonLock" '-'
+}
 
 gecko_version() {
     [ -r "$1/compatibility.ini" ] || return 0
@@ -204,6 +252,31 @@ backup() {  # $1 = file
     cp -p -- "$1" "$1.panoptes-bak-$STAMP" && info "backed up -> $(basename "$1").panoptes-bak-$STAMP"
 }
 
+SUPERSEDE_TAG="// PANOPTES-SUPERSEDED "
+
+managed_prefs() {  # the pref names this script owns
+    printf '%s\n' network.dns.echconfig.enabled network.dns.http3_echconfig.enabled \
+                   network.dns.upgrade_with_https_rr network.dns.use_https_rr_as_altsvc
+    [ "$NO_DOH" -eq 0 ] && printf '%s\n' network.trr.mode network.trr.uri \
+                                          network.trr.bootstrapAddress
+}
+
+# Comment out any hand-written copy of a pref we are about to set. Without this
+# the file accumulates a second definition of every pref on first run — harmless
+# while the values agree, and a silent conflict the moment they do not.
+supersede() {  # $1 = file to rewrite in place
+    local f=$1 name esc script=""
+    while read -r name; do
+        esc=$(printf '%s' "$name" | sed 's/\./\\./g')
+        script="$script;s|^\([[:space:]]*user_pref(\"$esc\".*\)\$|$SUPERSEDE_TAG\1|"
+    done <<<"$(managed_prefs)"
+    [ -n "$script" ] && sed -i "${script#;}" "$f"
+}
+
+unsupersede() {  # $1 = file to rewrite in place
+    sed -i "s|^$SUPERSEDE_TAG||" "$1"
+}
+
 strip_block() {  # stdin -> stdout, minus any managed block
     awk -v o="$MARK_OPEN" -v c="$MARK_CLOSE" '
         index($0, o) == 1 { s = 1 }
@@ -216,7 +289,8 @@ strip_block() {  # stdin -> stdout, minus any managed block
 gecko_apply() {  # $1 = profile dir
     local prof=$1 uj="$1/user.js" tmp
     if gecko_running "$prof"; then
-        warn "running — close it and re-run, or the block lands but is not read until restart"
+        warn "looks like it is running — the block is written either way, but is"
+        warn "not read until the next start. Restart it when you are done."
     fi
     local block
     block="$MARK_OPEN
@@ -243,6 +317,13 @@ $MARK_CLOSE"
     backup "$uj"
     tmp=$(mktemp) || { bad "mktemp failed"; return 1; }
     if [ -f "$uj" ]; then strip_block <"$uj" >"$tmp"; fi
+    local before after
+    before=$(grep -c "^$SUPERSEDE_TAG" "$tmp" 2>/dev/null || true)
+    supersede "$tmp"
+    after=$(grep -c "^$SUPERSEDE_TAG" "$tmp" 2>/dev/null || true)
+    if [ "${after:-0}" -gt "${before:-0}" ]; then
+        info "commented out $(( after - before )) earlier hand-set copies of these prefs"
+    fi
     printf '%s\n' "$block" >>"$tmp"
     if mv -- "$tmp" "$uj"; then
         ok "user.js updated"
@@ -258,7 +339,9 @@ gecko_revert() {
     [ "$DRY" -eq 1 ] && { info "would remove the managed block from user.js"; return 0; }
     backup "$uj"
     tmp=$(mktemp) || return 1
-    strip_block <"$uj" >"$tmp" && mv -- "$tmp" "$uj" && ok "managed block removed"
+    strip_block <"$uj" >"$tmp" || { rm -f -- "$tmp"; return 1; }
+    unsupersede "$tmp"
+    mv -- "$tmp" "$uj" && ok "managed block removed, earlier settings restored"
     info "prefs.js keeps the last values until you reset them in about:config"
 }
 

@@ -51,6 +51,36 @@ dependencies.
   the site's HTTPS DNS record over a protected channel to learn the ECH key, and
   Firefox will not attempt ECH at all with TRR off. Both are set together.
 
+## [2.0.1] — 2026-08-23
+
+### Fixed
+
+- `ech-browsers.sh` could not detect a running browser at all. `chromium_running`
+  tested `[ -e SingletonLock ]`, but that lock is a symlink to `hostname-pid`,
+  which is not a real path — `-e` follows it and always reported false. The
+  advertised "will not edit a running Chromium" protection never fired.
+- Both detectors now look for an open file descriptor under the profile, which
+  is the only evidence that survives sandboxing, and fall back to the lock file
+  only for non-sandboxed profiles. A Flatpak or Snap browser records its
+  *namespace* pid in the lock; testing that against host pids is meaningless and
+  actively wrong — a stale Flatpak lock here named pid 2, and pid 2 is
+  `kthreadd`, which is always alive.
+- The descriptor scan was itself broken by `pipefail`: `find -print -quit |
+  grep -q .` lets grep close the pipe first, so find dies of SIGPIPE with status
+  141 and the pipeline reports failure. Replaced with command substitution.
+- `ech-browsers.sh` now comments out earlier hand-written copies of the prefs it
+  manages, tagged `// PANOPTES-SUPERSEDED`, instead of appending a second
+  definition of each. `--revert` restores them, verified byte-for-byte.
+- Tor Browser and Mullvad Browser tarball install paths added to the skip table
+  so the report names them explicitly. Safety never depended on this — the
+  browser table is an allowlist and an unlisted profile is never written — but
+  a skip you cannot see is not a skip you can trust.
+
+### Added
+
+- README: a section explaining what ECH is, why SNI is the leak that DNS
+  encryption does not close, and — honestly — what ECH does not protect.
+
 ## [1.0.0] — 2026-08-22
 
 First public release: fourteen tools assembled from years of one-outage-at-a-time
@@ -66,5 +96,6 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[2.0.1]: https://github.com/doug445/Panoptes/releases/tag/v2.0.1
 [2.0.0]: https://github.com/doug445/Panoptes/releases/tag/v2.0.0
 [1.0.0]: https://github.com/doug445/Panoptes/releases/tag/v1.0.0
