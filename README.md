@@ -1,3 +1,8 @@
+<p align="center">
+  <img alt="Panoptes — Superior Linux Network Security"
+       src="docs/brand/panoptes-logo-dark.svg" width="480">
+</p>
+
 # Panoptes — the all-seeing network watch
 
 **A Linux network monitoring, DNS hardening and intrusion-investigation suite.**
