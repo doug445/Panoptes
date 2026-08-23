@@ -51,6 +51,20 @@ dependencies.
   the site's HTTPS DNS record over a protected channel to learn the ECH key, and
   Firefox will not attempt ECH at all with TRR off. Both are set together.
 
+## [2.2.1] — 2026-08-23
+
+### Changed
+
+- README: the ECH caveat about the destination IP said only "your IP address is
+  still visible", which is true of ECH standing alone and misleading for anyone
+  running a tunnel. It now says what actually happens: behind a VPN the
+  destination goes inside the tunnel and out of the ISP's view, but the tunnel
+  operator then sees both ends — and with WARP that operator is Cloudflare, who
+  is already the far end of most ECH-enabled connections. It also flags
+  split-tunnel excludes, which travel outside the tunnel and put the
+  destination IP back on the wire, leaving ECH as the only thing still hiding
+  the hostname.
+
 ## [2.2.0] — 2026-08-23
 
 2.1.0 fixed the resolver-flush in `warp-tray` only. An audit of every path in
@@ -163,6 +177,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[2.2.1]: https://github.com/doug445/Panoptes/releases/tag/v2.2.1
 [2.2.0]: https://github.com/doug445/Panoptes/releases/tag/v2.2.0
 [2.1.0]: https://github.com/doug445/Panoptes/releases/tag/v2.1.0
 [2.0.1]: https://github.com/doug445/Panoptes/releases/tag/v2.0.1

@@ -79,9 +79,19 @@ disabled. This is why `ech-browsers.sh` sets both together, and why turning on
 
 Worth being straight about, because ECH is easy to oversell:
 
-- **Your IP address is still visible.** Behind a large CDN that reveals little,
-  since thousands of sites share the address. A site on a dedicated IP is
-  identified by the IP alone, and ECH does not help.
+- **The destination IP is still visible**, unless you are also behind a VPN.
+  Behind a large CDN that reveals little, since thousands of sites share the
+  address; a site on a dedicated IP is identified by the address alone, and ECH
+  does not help. Run a tunnel such as WARP and the destination goes inside it,
+  out of your ISP's view — but that moves the visibility rather than removing
+  it, since the tunnel operator now sees both ends. With WARP specifically,
+  that operator is Cloudflare, who is already the other end of most
+  ECH-enabled connections.
+
+  Split-tunnel excludes are the case people forget: any host or range you
+  exclude travels outside the tunnel, so its IP is visible to the network again
+  and ECH is the only thing still hiding the hostname. Check yours with
+  `warp-cli settings`.
 - **It needs the site's cooperation.** Only sites publishing an ECH config get
   the protection. Cloudflare-fronted sites largely do; much of the web does not
   yet.
