@@ -20,7 +20,8 @@ USER_DIR="${HOME}/.local/bin"
 [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && \
     USER_DIR="$(getent passwd "$SUDO_USER" | cut -d: -f6)/.local/bin"
 
-SYS_TOOLS=(netmaster probesource wifi-recover.sh audit-dns.sh harden-dns.sh warp-killswitch dns-toggle)
+SYS_TOOLS=(netmaster probesource wifi-recover.sh audit-dns.sh harden-dns.sh warp-killswitch dns-toggle
+           panoptes-deps.sh ech-build.sh ech-browsers.sh)
 USER_TOOLS=(netcheck netwatch nettop checkdns dns-tray dns-status.sh warp-tray)
 
 DRY=0
