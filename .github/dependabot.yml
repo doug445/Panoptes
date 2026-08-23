@@ -1,12 +1,41 @@
-# To get started with Dependabot version updates, you'll need to specify which
-# package ecosystems to update and where the package manifests are located.
-# Please see the documentation for all configuration options:
+# Dependabot version updates.
 # https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# This repository is bash and python with no package manifests, so there is
+# exactly one ecosystem worth watching: the actions used by the CI workflow.
+# `directory` is "/" for github-actions regardless of where the workflows live —
+# Dependabot always looks in .github/workflows, not in the path given here.
 
 version: 2
 updates:
-  - package-ecosystem: "" # See documentation for possible values
-    directory: "/" # Location of package manifests
+  - package-ecosystem: "github-actions"
+    directory: "/"
     schedule:
       interval: "weekly"
- 
+      day: "monday"
+    # One PR for all action bumps rather than one per action. The workflow pins
+    # only checkout and setup-python; separate PRs for two actions is noise.
+    groups:
+      actions:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+
+# Not configured, deliberately:
+#
+#   pip — the only python dependency is `ruff`, installed inline in the workflow
+#   with `pip install ruff`. Dependabot needs a manifest it can read; it does not
+#   parse `run:` steps. If ruff ever gets pinned in a requirements file, add:
+#
+#     - package-ecosystem: "pip"
+#       directory: "/"
+#       schedule:
+#         interval: "weekly"
+#
+#   Everything else — the tools here depend on system packages (bind-utils,
+#   iproute, nftables and so on), which no dependency bot tracks. That is what
+#   panoptes-deps.sh is for.
