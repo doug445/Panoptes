@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/doug445/Panoptes/blob/main/SECURITY.md
+    about: Do not open a public issue. Report privately by email — see SECURITY.md.
+  - name: How to write a report that can be acted on
+    url: https://github.com/doug445/Panoptes/blob/main/CONTRIBUTING.md
+    about: The diagnostic bundle, the read-only vs writing split, and what to redact.
