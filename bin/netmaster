@@ -223,6 +223,22 @@ warn() { echo "${C_Y}[warn]${C_0} $*"; }
 info() { echo "[info] $*"; }
 step() { echo; echo "${C_B}--> $*${C_0}"; }
 
+# Bringing the WARP tunnel up or down kills every DNS lookup in flight over it.
+# Those fail DNSSEC validation with 'failed-auxiliary' -- the transport carrying
+# the DS/DNSKEY chain vanished mid-lookup -- and systemd-resolved caches the
+# failure. Routing is fine immediately afterwards; only the cache is stale, and
+# it reads as "no internet" until something clears it.
+#
+# Paths that restart systemd-resolved (warp-killswitch, the S5/S6 repair ladder)
+# already get this for free -- a restart drops both the cache and the per-server
+# feature grades. This is for the paths that do not.
+flush_resolver() {
+    act "flush resolver cache after WARP state change" "" \
+        $RESOLVECTL flush-caches
+    act "reset learned per-server DNS features" "" \
+        $RESOLVECTL reset-server-features
+}
+
 # act — the ONLY way this script mutates anything.
 #   act "<human description>" "<undo command>" <command...>
 # Honours --dry-run, records the undo line, echoes under --verbose.
@@ -1147,22 +1163,31 @@ cmd_warp() {
       off)
         hdr "WARP off"
         confirm "  take WARP down?" || return 1
-        [ -x "$KILLSWITCH" ] && act "warp-killswitch down" "" $KILLSWITCH down || {
+        if [ -x "$KILLSWITCH" ]; then
+            # warp-killswitch restarts systemd-resolved itself.
+            act "warp-killswitch down" "" $KILLSWITCH down
+        else
             act "stop warp-svc.socket" "" $SCTL stop warp-svc.socket
             act "stop warp-svc"        "" $SCTL stop warp-svc
-            act "disable warp-svc"     "" $SCTL disable warp-svc; }
+            act "disable warp-svc"     "" $SCTL disable warp-svc
+            flush_resolver
+        fi
         fix_stale_warp
         discover; ladder; ladder_line
         ;;
       on)
         hdr "WARP on"
         detect_guard || { info "installing the durable guard first — without it WARP's tun gets persisted by NM"; install_guard; }
-        [ -x "$KILLSWITCH" ] && [ "$($KILLSWITCH state 2>/dev/null)" = killed ] \
-            && act "warp-killswitch up" "" $KILLSWITCH up || {
+        if [ -x "$KILLSWITCH" ] && [ "$($KILLSWITCH state 2>/dev/null)" = killed ]; then
+            # warp-killswitch restarts systemd-resolved itself.
+            act "warp-killswitch up" "" $KILLSWITCH up
+        else
             act "enable warp-svc" "" $SCTL enable warp-svc
             act "start warp-svc"  "" $SCTL start warp-svc
             [ "$DRY" -eq 0 ] && /usr/bin/sleep 4
-            act "warp-cli connect" "" /usr/bin/timeout 25 /usr/bin/warp-cli --accept-tos connect; }
+            act "warp-cli connect" "" /usr/bin/timeout 25 /usr/bin/warp-cli --accept-tos connect
+            flush_resolver
+        fi
         [ "$DRY" -eq 0 ] && /usr/bin/sleep 4
         ARGS=status; cmd_warp
         ;;
@@ -1181,6 +1206,7 @@ cmd_warp() {
         [ "$DRY" -eq 0 ] && /usr/bin/sleep 5
         act "warp-cli connect"     "" /usr/bin/timeout 25 /usr/bin/warp-cli --accept-tos connect
         [ "$DRY" -eq 0 ] && /usr/bin/sleep 4
+        flush_resolver
         ARGS=status; cmd_warp
         ;;
       *) echo "usage: netmaster warp {status|on|off|reset}" >&2; return 2 ;;
