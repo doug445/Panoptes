@@ -51,6 +51,47 @@ dependencies.
   the site's HTTPS DNS record over a protected channel to learn the ECH key, and
   Firefox will not attempt ECH at all with TRR off. Both are set together.
 
+## [2.1.0] — 2026-08-23
+
+Toggling WARP off used to leave the resolver answering from a poisoned cache.
+
+### Fixed
+
+- **`warp-tray` now flushes the resolver after any WARP state change.** Tearing
+  the tunnel down kills every DNS lookup in flight over it; those fail DNSSEC
+  validation with `failed-auxiliary`, because the transport carrying the DS and
+  DNSKEY chain vanished mid-lookup, and `systemd-resolved` caches the failure.
+  The network is fine immediately afterwards — verified directly: with WARP
+  disconnected the `nftables` table, `ip rule` and routing table are all gone,
+  the route falls back to the LAN gateway, and both ping and DNS work. Only the
+  cache is stale. It reads as "no internet", and it is enough to make Firefox's
+  captive-portal probe declare the link down.
+
+  Measured over a teardown with lookups deliberately in flight: **4 of 12
+  probes failed without the flush, 0 of 12 with it.** `resolvectl
+  reset-server-features` runs too, so resolved re-probes DoT and DNSSEC support
+  rather than trusting grades it learned over the old transport. The killswitch
+  menu path flushes as well.
+
+- **`dns-toggle` now appends Quad9 to `DNS=`, giving real resolver failover.**
+  `FallbackDNS=` never provided this: per `resolved.conf(5)` it is *"only used
+  if no other DNS server information is known"* — that is, only when `DNS=` is
+  empty. It is not consulted when the servers in `DNS=` stop answering, which is
+  exactly what people assume it covers. The trade-off is documented in the
+  script: resolved sticks with whichever server last worked, so after a failover
+  you stay on Quad9, with malware filtering but no ad blocking, until it
+  restarts.
+
+- **The tray icons are now shipped and installed.** Both applets load their
+  icons by absolute path from `~/.local/share/icons`, but the repository never
+  contained them — a fresh install produced trays with no artwork, which looks
+  like a crash. `install.sh` now places all four.
+
+### Changed
+
+- README: a section on the two tray toggles, with an annotated screenshot
+  showing each icon in place and both of its states.
+
 ## [2.0.1] — 2026-08-23
 
 ### Fixed
@@ -96,6 +137,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[2.1.0]: https://github.com/doug445/Panoptes/releases/tag/v2.1.0
 [2.0.1]: https://github.com/doug445/Panoptes/releases/tag/v2.0.1
 [2.0.0]: https://github.com/doug445/Panoptes/releases/tag/v2.0.0
 [1.0.0]: https://github.com/doug445/Panoptes/releases/tag/v1.0.0

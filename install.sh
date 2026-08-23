@@ -23,9 +23,12 @@
 
 set -euo pipefail
 
-SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bin"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC="$ROOT/bin"
+ICON_SRC="$ROOT/share/icons"
 SYS_DIR=/usr/local/bin
 USER_DIR="${HOME}/.local/bin"
+ICON_DIR="${HOME}/.local/share/icons"
 
 SYS_TOOLS=(netmaster probesource wifi-recover.sh audit-dns.sh harden-dns.sh warp-killswitch dns-toggle
            panoptes-deps.sh ech-build.sh ech-browsers.sh)
@@ -86,6 +89,7 @@ fi
 # When run under sudo, ~ is root's; install user tools for the invoking user.
 if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
     USER_DIR="$(getent passwd "$SUDO_USER" | cut -d: -f6)/.local/bin"
+    ICON_DIR="$(getent passwd "$SUDO_USER" | cut -d: -f6)/.local/share/icons"
 fi
 
 put() {  # $1 = file, $2 = destination dir, $3 = owner spec or empty
@@ -110,6 +114,25 @@ if [ "${#usr[@]}" -gt 0 ]; then
     [ "$DRY" -eq 0 ] && install -d ${own:+-o "${own%%:*}" -g "${own##*:}"} "$USER_DIR"
     for f in "${usr[@]}"; do put "$f" "$USER_DIR" "$own"; done
 fi
+
+# The tray applets load their icons by absolute path from ~/.local/share/icons.
+# Without these the trays start but show nothing, which looks like a crash.
+case "$MODE" in
+    all|user)
+        echo "Tray icons -> $ICON_DIR"
+        own=""
+        [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && own="$SUDO_USER:$SUDO_USER"
+        for f in "$ICON_SRC"/*.svg; do
+            [ -f "$f" ] || continue
+            if [ "$DRY" -eq 1 ]; then
+                echo "  would install $(basename "$f") -> $ICON_DIR/"
+                continue
+            fi
+            install -d ${own:+-o "${own%%:*}" -g "${own##*:}"} "$ICON_DIR"
+            install -m 0644 ${own:+-o "${own%%:*}" -g "${own##*:}"} "$f" "$ICON_DIR/"
+            echo "  $ICON_DIR/$(basename "$f")"
+        done ;;
+esac
 
 echo ""
 echo "Done. Nothing was enabled as a service."
