@@ -6,10 +6,15 @@
 # Panoptes — the all-seeing network watch
 
 **A Linux network monitoring, DNS hardening and intrusion-investigation suite.**
-Fourteen field-tested command-line tools for DNS leak auditing, DNSSEC and
-DNS-over-TLS enforcement, Encrypted Client Hello (ECH) verification, Cloudflare
-WARP control, firewalld/nftables drop monitoring, ARP-spoofing detection, Wi-Fi
-recovery, and deep investigation of any IP that touches your machine.
+Seventeen field-tested command-line tools for DNS leak auditing, DNSSEC and
+DNS-over-TLS enforcement, **Encrypted Client Hello (ECH)** — building an
+ECH-capable curl and turning ECH on in every browser — Cloudflare WARP control,
+firewalld/nftables drop monitoring, ARP-spoofing detection, Wi-Fi recovery, and
+deep investigation of any IP that touches your machine.
+
+It installs its own dependencies: Panoptes identifies your distribution and
+package manager and pulls in whatever is missing, on Fedora, Debian/Ubuntu,
+Arch, openSUSE and Alpine.
 
 [![lint](https://github.com/doug445/Panoptes/actions/workflows/lint.yml/badge.svg)](https://github.com/doug445/Panoptes/actions/workflows/lint.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -53,6 +58,7 @@ Then:
 checkdns              # resolver, WARP, mDNS and ECH status in one readout
 sudo audit-dns.sh     # what controls DNS here, and where a leak could get in
 netcheck              # interfaces, Wi-Fi band/bitrate, firewall, whois
+ech-browsers.sh       # turn on Encrypted Client Hello in every browser you have
 ```
 
 Nothing installs a service or changes your system until you ask it to.
@@ -81,6 +87,24 @@ Nothing installs a service or changes your system until you ask it to.
 | **`probesource`** | **The centrepiece.** Investigate any address — a firewall drop, a probe, a live connection. Pass one in as `probesource <ip>`, or pick a target from the UFW journal, the `netwatch` log, the live `ss` table, or type one in. Then run a single tactic, a one-pass sweep, or a relentless escalating sweep. Passive tactics: `whois`, reverse DNS, GeoIP, journal and `netwatch` history, neighbour table and OUI lookup, live socket state, conntrack, ipset membership, short `tcpdump`/`tshark` capture, and a `p0f` fingerprint listener. |
 | **`nettop`** | Lists hosts on the LAN and WAN with vendor attribution — active `arp-scan` for the LAN, falling back to `ip neigh` plus OUI lookup, with `whois` filling in vendor for public addresses. |
 | **`netcheck`** | Full network status readout: every interface, Wi-Fi SSID, band, channel, frequency, protocol and bitrate for each adapter, firewall state, and cached `whois` for public addresses (private ranges are skipped). |
+
+### TLS — Encrypted Client Hello
+
+ECH encrypts the server name in the TLS handshake. Without it, every site you
+visit is legible to anyone on the path even over HTTPS, because the SNI field
+travels in the clear. These two tools are the practical half of the problem:
+getting software that can speak ECH, and switching it on.
+
+| Tool | What it does |
+|------|--------------|
+| **`ech-build.sh`** | Builds an **ECH-capable curl**, because no distribution ships one — no released OpenSSL implements ECH. Compiles the OpenSSL ECH branch into `/opt/openssl-ech` (static, so nothing else on the system can link it), then curl against it into `/usr/local`. Neither prefix belongs to a package manager, so `dnf upgrade` and `apt full-upgrade` leave the result alone permanently. `--verify` runs a real `--ech hard` handshake, which refuses to fall back to a cleartext SNI, so a pass is a pass. `--uninstall` hands curl back to the distribution. |
+| **`ech-browsers.sh`** | Finds **every browser on the machine** — native, Flatpak and Snap, Firefox-family and Chromium-family — and enables ECH plus the secure DNS it depends on. Firefox-family settings go into `user.js`, so they survive a preferences reset; Chromium-family settings go into `Local State`. Idempotent, backs up every file it touches, and `--revert` undoes all of it. Skips config directories left behind by uninstalled browsers, and **never touches Tor Browser or Mullvad Browser** — those resolve through their proxy circuit on purpose, and pointing them at a DoH resolver would send lookups around it. |
+
+### Setup
+
+| Tool | What it does |
+|------|--------------|
+| **`panoptes-deps.sh`** | Identifies the distribution and package manager, works out which of the suite's ~45 requirements this machine is missing, and installs them. Detection reads `/etc/os-release` `ID` and `ID_LIKE` rather than probing for binaries — a Fedora box can ship `/usr/bin/pacman`, and it is the arcade game. Understands **dnf5/dnf/yum, apt, pacman, zypper and apk**, resolves requirements by group (`core`, `dns`, `firewall`, `investigate`, `tray`, `build`), retries individually if a batch install fails so the report names exactly what your repositories lack, and re-probes afterwards so its exit status reflects reality rather than the package manager's opinion. `install.sh` runs it for you. |
 
 ### Repair and control
 
@@ -116,6 +140,9 @@ is wrong with my network" and "I know exactly what and why".
 ```bash
 sudo ./install.sh              # installs everything
 sudo ./install.sh --dns-only   # just the DNS tools
+sudo ./install.sh --ech-only   # just the ECH tools
+sudo ./install.sh --deps-only  # only resolve dependencies, install no tools
+sudo ./install.sh --no-deps    # skip the dependency check
 ./install.sh --user            # user tools only, no sudo, into ~/.local/bin
 sudo ./uninstall.sh            # removes everything it installed
 ```
@@ -125,12 +152,27 @@ System tools land in `/usr/local/bin`, user tools and tray applets in
 
 ### Dependencies
 
-Everything degrades gracefully — a missing optional tool disables one tactic, it
-does not break the run.
+You do not have to work these out. `install.sh` runs `panoptes-deps.sh` first,
+which detects your distribution and package manager and offers to install
+everything missing:
+
+```bash
+./panoptes-deps.sh --check    # report only, change nothing
+./panoptes-deps.sh --list     # the whole requirement table, with your package names
+./panoptes-deps.sh --print    # print the install command, run nothing
+sudo ./panoptes-deps.sh       # install what is missing, after asking
+```
+
+Everything still degrades gracefully — a missing optional tool disables one
+tactic, it does not break the run.
 
 | Required | Optional (per tactic) |
 |---|---|
 | `bash` 4+, `systemd-resolved`, `iproute2`, `python3` | `arp-scan`, `whois`, `tcpdump`, `tshark`, `p0f`, `conntrack`, `ipset`, `dig` (bind-utils), `firewalld`, `warp-cli` |
+
+Package managers understood: **dnf5/dnf/yum**, **apt**, **pacman**, **zypper**,
+**apk**. On anything else the tool prints the requirement list and exits without
+touching your system.
 
 ---
 
@@ -156,7 +198,44 @@ obvious at a glance.
 ECHConfig, and whether a real TLS handshake with `curl --ech hard` succeeds
 against `defo.ie`. Note that stock distribution `curl` builds often lack ECH
 support entirely — the tool detects this and says so rather than reporting a
-false failure.
+false failure. When it does, `ech-build.sh` builds you one (below), and
+`ech-browsers.sh` turns ECH on in your browsers.
+
+### How do I get a curl that supports ECH on Linux?
+
+Build one — no distribution ships it, because no released OpenSSL implements
+ECH yet. `ech-build.sh` does the whole job:
+
+```bash
+sudo ./ech-build.sh --deps    # install the build dependencies
+./ech-build.sh                # build and install
+./ech-build.sh --verify       # prove it with a live handshake
+```
+
+OpenSSL's ECH branch goes to `/opt/openssl-ech` and is linked **statically**, so
+no other program on the system can pick up a development TLS stack. curl goes to
+`/usr/local`. Neither path is owned by a package manager, so system updates never
+overwrite them. Your distribution's `/usr/bin/curl` stays installed as a fallback
+for the features this minimal build omits.
+
+### How do I enable ECH in Firefox, Chrome, Brave or LibreWolf?
+
+```bash
+ech-browsers.sh
+```
+
+It finds every browser you have — including Flatpak and Snap installs — and sets
+the ECH preferences plus the DNS-over-HTTPS that ECH depends on. **Enabling ECH
+without secure DNS does nothing**: the browser has to fetch the site's HTTPS DNS
+record over a protected channel to learn the ECH key, and Firefox will not
+attempt ECH at all with TRR off. Firefox-family settings are written to `user.js`
+so a preferences reset does not silently undo them.
+
+Close your Chromium-family browsers first. They rewrite `Local State` when they
+exit and will overwrite the change otherwise — the script warns you and skips
+them rather than making an edit that quietly disappears.
+
+Verify at [defo.ie/ech-check.php](https://defo.ie/ech-check.php).
 
 ### Something is probing my machine. How do I find out who?
 
