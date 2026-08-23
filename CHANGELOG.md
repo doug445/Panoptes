@@ -51,6 +51,19 @@ dependencies.
   the site's HTTPS DNS record over a protected channel to learn the ECH key, and
   Firefox will not attempt ECH at all with TRR off. Both are set together.
 
+## [2.3.1] — 2026-08-23
+
+### Fixed
+
+- `.github/dependabot.yml` was still the GitHub starter template with an empty
+  `package-ecosystem`, which Dependabot rejects — it was watching nothing.
+  Filled in with `github-actions`, the only ecosystem that applies: the workflow
+  pins `actions/checkout` and `actions/setup-python`, and the repository has no
+  package manifests. Bumps are grouped into one pull request rather than one per
+  action. The file records why `pip` is absent — `ruff` is installed inline in a
+  `run:` step, which Dependabot does not parse — and carries the block to paste
+  in if it is ever pinned in a manifest.
+
 ## [2.3.0] — 2026-08-23
 
 The suite shipped two tools for controlling WARP and no way to get it. Now it
@@ -213,6 +226,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[2.3.1]: https://github.com/doug445/Panoptes/releases/tag/v2.3.1
 [2.3.0]: https://github.com/doug445/Panoptes/releases/tag/v2.3.0
 [2.2.1]: https://github.com/doug445/Panoptes/releases/tag/v2.2.1
 [2.2.0]: https://github.com/doug445/Panoptes/releases/tag/v2.2.0
