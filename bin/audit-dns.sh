@@ -24,7 +24,8 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 #
-# DNS audit — distro-agnostic snapshot for Fedora / Fedora Asahi / Mint / Manjaro.
+# DNS audit — distro-agnostic snapshot for Fedora / Fedora Asahi / Mint /
+# Manjaro / EndeavourOS.
 # Read-only: prints what controls DNS on this box and where pushed-DNS could leak in.
 # Run as root for full visibility (WireGuard/OpenVPN configs are usually 600).
 
