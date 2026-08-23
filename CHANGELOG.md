@@ -51,6 +51,32 @@ dependencies.
   the site's HTTPS DNS record over a protected channel to learn the ECH key, and
   Firefox will not attempt ECH at all with TRR off. Both are set together.
 
+## [2.2.0] — 2026-08-23
+
+2.1.0 fixed the resolver-flush in `warp-tray` only. An audit of every path in
+the suite that changes WARP state found three more that needed it.
+
+### Fixed
+
+- **`netmaster warp off`, `warp on` and `warp reset` now flush the resolver.**
+  Each of `off` and `on` has two branches: one delegating to `warp-killswitch`,
+  and a fallback for when the killswitch is not installed. The killswitch
+  branches were already covered — `warp-killswitch` restarts
+  `systemd-resolved`, which drops both the cache and the learned per-server
+  feature grades. The fallback branches, and the whole of `reset`, brought the
+  tunnel up or down and left the cache untouched.
+
+### Audited and found already correct
+
+Recorded here so the next person does not re-check them:
+
+- `warp-killswitch down` / `up` — restart `systemd-resolved` directly.
+- `netmaster fix` (the S5/S6 ladder) — restarts `systemd-resolved` at S6.
+- `dns-toggle` — restarts the resolver and resets server features (2.1.0).
+- `checkdns` — read-only.
+- `netcheck` — its `resolvectl flush-caches` is unrelated; it provokes a real
+  upstream round-trip so the DoT probe is not answered from cache.
+
 ## [2.1.0] — 2026-08-23
 
 Toggling WARP off used to leave the resolver answering from a poisoned cache.
@@ -137,6 +163,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[2.2.0]: https://github.com/doug445/Panoptes/releases/tag/v2.2.0
 [2.1.0]: https://github.com/doug445/Panoptes/releases/tag/v2.1.0
 [2.0.1]: https://github.com/doug445/Panoptes/releases/tag/v2.0.1
 [2.0.0]: https://github.com/doug445/Panoptes/releases/tag/v2.0.0
