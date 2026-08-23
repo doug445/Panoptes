@@ -141,6 +141,76 @@ Nothing installs a service or changes your system until you ask it to.
 | **`dns-status.sh`** | One-line current-resolver indicator, for status bars and tray applets. |
 | **`dns-tray`** | System tray applet: shows the active resolver and toggles it on click. Daemonizes cleanly so closing the shell does not kill it. |
 
+#### The two tray toggles
+
+`dns-tray` and `warp-tray` put one-click control of the resolver and the tunnel
+in the system tray. Both follow the same convention: **green means active, red
+means not active**, a left-click flips the state, and a desktop notification
+confirms what happened.
+
+Note that "not active" means different things for the two. `dns-tray` never
+turns DNS off — it switches between two encrypted resolvers, so red there means
+*the other resolver*, not "no DNS". `warp-tray` red means the tunnel really is
+down.
+
+![The dns-tray and warp-tray applets in a KDE system tray, magnified, with each
+icon labelled and its green and red states shown side by side](docs/images/tray-toggles.png)
+
+**`dns-tray` — the green `AG` shield.** A left-click runs `dns-toggle`, which
+flips `systemd-resolved` between two encrypted resolvers:
+
+| State | Resolver | What it gives you |
+|---|---|---|
+| 🟢 green | AdGuard `94.140.14.14` / `.15.15` over DoT | Ad and tracker filtering at the DNS layer |
+| 🔴 red | Cloudflare `1.1.1.2` security over DoT | Malware filtering, no ad blocking, usually faster |
+
+Both lists also end with Quad9 (`9.9.9.9`) as a cross-provider failover, because
+`FallbackDNS=` cannot do that job — see the note below.
+
+Neither state is "DNS off" — both are encrypted, DNSSEC-validated resolvers, and
+the fallback stays Quad9 + Cloudflare either way. The toggle handles the
+`chattr +i` immutability lock on `resolved.conf` for you: it unlocks, rewrites,
+and relocks. Flipping it is safe at any time.
+
+**`warp-tray` — the green `W`.** A left-click connects or disconnects Cloudflare
+WARP. A right-click opens the killswitch menu: *Tear Down* runs
+`warp-killswitch down`, *Rebuild* runs `warp-killswitch up`.
+
+> [!IMPORTANT]
+> **Toggling WARP off drops every DNS lookup that is in flight at that moment.**
+> The tunnel teardown itself is clean — the `nftables` table, the `ip rule` and
+> the routing table all come down with it, and plain routing works immediately
+> afterwards. What does not survive is any query already in progress: those fail
+> DNSSEC validation with `failed-auxiliary`, because the transport carrying the
+> DS and DNSKEY lookups disappeared mid-chain, and `systemd-resolved` caches the
+> failure.
+>
+> The visible result is a browser insisting it is offline while the network is
+> fine — Firefox's captive-portal probe is usually among the casualties, and a
+> failed probe is enough for it to declare no connectivity.
+>
+> **`FallbackDNS=` will not save you, and this surprises people.** Per
+> `resolved.conf(5)` it is *"only used if no other DNS server information is
+> known"* — that is, only when `DNS=` is empty. It is **not** a failover for the
+> servers in `DNS=` going quiet. If you want real resolver failover, list the
+> extra servers in `DNS=` itself.
+>
+> Clearing the cached failures is enough to recover:
+>
+> ```bash
+> resolvectl flush-caches
+> ```
+>
+> Restarting `systemd-resolved` does the same thing, which is why flipping
+> `dns-tray` appears to "fix" a WARP-related outage — it restarts the resolver as
+> a side effect of rewriting the config.
+>
+> If WARP has genuinely wedged the network rather than just the cache,
+> `warp-killswitch down` removes its `nftables` table, restores plain DNS and
+> disables the daemon so it stays down across a reboot; `warp-killswitch up`
+> puts it all back.
+
+
 ### Monitoring and investigation
 
 | Tool | What it does |

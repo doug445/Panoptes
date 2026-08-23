@@ -38,12 +38,28 @@ relock() {
 }
 trap relock EXIT
 
+# Every DNS= list ends with Quad9 as a cross-provider failover.
+#
+# FallbackDNS= cannot do this job. Per resolved.conf(5) it is "only used if no
+# other DNS server information is known" -- that is, only when DNS= is empty.
+# It is never consulted because the servers in DNS= stopped answering, which is
+# the case people expect it to cover. Real failover has to live in DNS= itself.
+#
+# The trade-off is deliberate and worth knowing: systemd-resolved sticks with
+# whichever server last worked, so after a failover you stay on Quad9 -- malware
+# filtering, but no ad blocking -- until resolved restarts or Quad9 itself
+# fails. Re-run this script to go back.
+FAILOVER="9.9.9.9#dns.quad9.net"
+
 if grep -q '94.140.14.14' "$CONF_FILE"; then
-    sed -i 's/^DNS=.*/DNS=1.1.1.2#security.cloudflare-dns.com 1.0.0.2#security.cloudflare-dns.com/' "$CONF_FILE"
-    sed -i 's|^FallbackDNS=.*|FallbackDNS=9.9.9.9#dns.quad9.net 1.1.1.2#security.cloudflare-dns.com|' "$CONF_FILE"
+    sed -i "s/^DNS=.*/DNS=1.1.1.2#security.cloudflare-dns.com 1.0.0.2#security.cloudflare-dns.com $FAILOVER/" "$CONF_FILE"
 else
-    sed -i 's/^DNS=.*/DNS=94.140.14.14#dns.adguard-dns.com 94.140.15.15#dns.adguard-dns.com/' "$CONF_FILE"
-    sed -i 's|^FallbackDNS=.*|FallbackDNS=9.9.9.9#dns.quad9.net 1.1.1.2#security.cloudflare-dns.com|' "$CONF_FILE"
+    sed -i "s/^DNS=.*/DNS=94.140.14.14#dns.adguard-dns.com 94.140.15.15#dns.adguard-dns.com $FAILOVER/" "$CONF_FILE"
 fi
+sed -i 's|^FallbackDNS=.*|FallbackDNS=9.9.9.9#dns.quad9.net 1.1.1.2#security.cloudflare-dns.com|' "$CONF_FILE"
 
 systemctl restart systemd-resolved
+
+# A restart empties the cache, but not the per-server feature grades resolved
+# learned over whatever transport was up before. Drop those too.
+resolvectl reset-server-features 2>/dev/null || true
