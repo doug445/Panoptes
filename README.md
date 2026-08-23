@@ -16,9 +16,11 @@ recovery, and deep investigation of any IP that touches your machine.
 ![Shell](https://img.shields.io/badge/shell-bash-4EAA25)
 ![Platform](https://img.shields.io/badge/platform-Linux-blue)
 
-Built and used daily on **Fedora**, with support for **Linux Mint**, **Manjaro**,
-**Debian/Ubuntu** and **Fedora Asahi Remix** (Apple Silicon). Anything running
-**systemd-resolved** and **NetworkManager** is in scope.
+Built and used daily on **Fedora**. The suite is tested and working on
+**Linux Mint**, **Manjaro**, **EndeavourOS**, **Debian/Ubuntu** and
+**Fedora Asahi Remix** (Apple Silicon). It should work on any other Linux
+distribution too — the list above is where it has been run, not a limit.
+Anything running **systemd-resolved** and **NetworkManager** is in scope.
 
 ---
 
@@ -185,10 +187,19 @@ That is precisely what `netmaster` was written for. Run it. Also try
 
 ### Does this work on Debian, Ubuntu, Arch, or Apple Silicon?
 
-The DNS tools target anything using NetworkManager plus `systemd-resolved`,
-which covers Fedora, Linux Mint, Manjaro, Debian and Ubuntu. `netcheck`,
-`nettop` and `probesource` are distribution-agnostic. Everything runs on
-**Fedora Asahi Remix** on Apple Silicon — that is where it is developed.
+Yes. The DNS tools target anything using NetworkManager plus
+`systemd-resolved`, which covers Fedora, Linux Mint, Manjaro, EndeavourOS,
+Debian and Ubuntu. `netcheck`, `nettop` and `probesource` are
+distribution-agnostic. Everything runs on **Fedora Asahi Remix** on Apple
+Silicon — that is where it is developed. The suite is tested and working on
+all of them.
+
+**A distribution not on that list should work too.** Nothing here is tied to a
+package manager or a release — the requirements are `systemd-resolved`,
+NetworkManager, and the optional tools listed under
+[Dependencies](#dependencies). If your distribution has those, the suite
+applies. If something does not work on one that is not listed, that is a bug
+worth reporting.
 
 ### Is any of this safe to run on a production machine?
 
@@ -214,8 +225,11 @@ that writes says so, and `harden-dns.sh` supports `--dry-run`.
 
 ## Contributing
 
-Issues and pull requests welcome. Please run the lint workflow locally before
-opening a PR:
+Issues and pull requests welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for
+the diagnostic bundle to attach to a bug report, the full local lint block that
+mirrors CI, and what a patch is expected to carry.
+
+The short version — run this before opening a PR:
 
 ```bash
 shellcheck -S warning bin/* install.sh uninstall.sh   # bash tools
@@ -223,6 +237,9 @@ ruff check --isolated bin/dns-tray bin/warp-tray      # python tools
 ```
 
 Both are clean on `main` and CI fails on any regression.
+
+Found a security issue? Do not open a public issue — see
+[`SECURITY.md`](SECURITY.md).
 
 ## License
 

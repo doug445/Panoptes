@@ -26,7 +26,8 @@
 #
 # harden-dns.sh — defense-in-depth DNS hardening for NetworkManager + systemd-resolved.
 # Idempotent: re-runs do nothing if everything is already in the desired state.
-# Targets: Linux Mint, Fedora, Fedora Asahi, Manjaro (anything using NM + resolved).
+# Targets: Linux Mint, Fedora, Fedora Asahi, Manjaro, EndeavourOS
+# (anything using NM + resolved).
 #
 # Usage:
 #   sudo ./harden-dns.sh [--dry-run] [--no-lock] [--skip-nm] [--skip-resolved]
