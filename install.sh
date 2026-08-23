@@ -31,7 +31,7 @@ USER_DIR="${HOME}/.local/bin"
 ICON_DIR="${HOME}/.local/share/icons"
 
 SYS_TOOLS=(netmaster probesource wifi-recover.sh audit-dns.sh harden-dns.sh warp-killswitch dns-toggle
-           panoptes-deps.sh ech-build.sh ech-browsers.sh)
+           panoptes-deps.sh ech-build.sh ech-browsers.sh warp-setup.sh)
 USER_TOOLS=(netcheck netwatch nettop checkdns dns-tray dns-status.sh warp-tray)
 DNS_SYS=(audit-dns.sh harden-dns.sh dns-toggle)
 DNS_USER=(checkdns dns-status.sh dns-tray)

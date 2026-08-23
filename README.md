@@ -6,7 +6,7 @@
 # Panoptes — the all-seeing network watch
 
 **A Linux network monitoring, DNS hardening and intrusion-investigation suite.**
-Seventeen field-tested command-line tools for DNS leak auditing, DNSSEC and
+Eighteen field-tested command-line tools for DNS leak auditing, DNSSEC and
 DNS-over-TLS enforcement, **Encrypted Client Hello (ECH)** — building an
 ECH-capable curl and turning ECH on in every browser — Cloudflare WARP control,
 firewalld/nftables drop monitoring, ARP-spoofing detection, Wi-Fi recovery, and
@@ -254,6 +254,7 @@ getting software that can speak ECH, and switching it on.
 |------|--------------|
 | **`netmaster`** | The master repair tool, absorbing five earlier one-off scripts. Built from a specific outage: Wi-Fi associated, LAN worked, internet was gone, and it survived reboots — the cause was a stale VPN `tun` device NetworkManager had adopted and persisted with hundreds of static routes. Delegates to the other tools where they exist but does not require them. |
 | **`wifi-recover.sh`** | Wi-Fi diagnosis and repair. Defaults to **diagnose-only, no system changes**. `--repair` performs safe reversible fixes; `--reload-modules` adds aggressive driver reloads (risky on patched `wl`); `--bundle` tars the logs for carrying off the box. |
+| **`warp-setup.sh`** | Installs and activates **Cloudflare WARP**, which no distribution packages — it adds Cloudflare's own repository (RPM or APT, with signature checking on), installs the client, registers the device and connects. Sets `tunnel_only` mode by default and explains why: WARP's other modes proxy DNS themselves, which fights `harden-dns.sh`, `dns-toggle` and `checkdns`; `tunnel_only` carries traffic and leaves resolution to `systemd-resolved`. Asks before registering, since that creates a device record on Cloudflare's side. `--check` reports state, `--mode` switches mode, `--uninstall` removes the client and the repository. |
 | **`warp-killswitch`** | Tears Cloudflare WARP down to nothing — stops *and disables* the daemon so it stays down across reboot, removes its `nftables` table, and drops to plain DNS. `up` restores the previous DNS verbatim and reconnects. `state` prints `killed` or `armed`. For when WARP blackholes your connectivity and you need out, now. |
 | **`warp-tray`** | Cloudflare WARP system tray applet with a single-instance guard, and a right-click path to the killswitch. |
 
@@ -311,6 +312,15 @@ tactic, it does not break the run.
 | Required | Optional (per tactic) |
 |---|---|
 | `bash` 4+, `systemd-resolved`, `iproute2`, `python3` | `arp-scan`, `whois`, `tcpdump`, `tshark`, `p0f`, `conntrack`, `ipset`, `dig` (bind-utils), `firewalld`, `warp-cli` |
+
+`warp-cli` is the one requirement no distribution ships. `panoptes-deps.sh`
+reports it and points you at `warp-setup.sh`, which adds Cloudflare's repository
+and installs it.
+
+**AdGuard needs no installation.** It is a public resolver
+(`94.140.14.14` / `94.140.15.15` over DoT), not software — `harden-dns.sh` and
+`dns-toggle` simply point `systemd-resolved` at it. Only WARP runs a local
+daemon and therefore needs installing.
 
 Package managers understood: **dnf5/dnf/yum**, **apt**, **pacman**, **zypper**,
 **apk**. On anything else the tool prints the requirement list and exits without
