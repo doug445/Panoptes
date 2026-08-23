@@ -44,6 +44,68 @@ across reboots. `probesource` exists because "who is 5.42.x.x and why is it
 knocking" deserved a better answer than four terminals of `whois`, `dig` and
 `tcpdump`.
 
+## What Encrypted Client Hello is, and why it matters
+
+HTTPS encrypts what you send and receive. It does not encrypt **which site you
+are talking to**. The very first packet of a TLS handshake — the ClientHello —
+carries the hostname in a field called SNI, in the clear, before any encryption
+exists. Anyone on the path reads it: your ISP, the coffee-shop router, the
+hotel network, a national firewall, a corporate middlebox.
+
+That single field is how most real-world web filtering and logging works. Not by
+breaking encryption — by reading the label on the envelope.
+
+People usually plug the DNS half of this leak first, with DNS-over-HTTPS or
+DNS-over-TLS, and reasonably conclude they are covered. They are not. Encrypting
+your lookups hides the *question*; SNI still announces the *answer* a few
+milliseconds later, on every single connection.
+
+**ECH closes that hole.** The site publishes a public key in a DNS `HTTPS`
+record. Your browser encrypts the real ClientHello — hostname included — to that
+key, and wraps it in an outer one naming only the provider. An observer sees a
+connection to `cloudflare-ech.com`, or whatever the front is, and cannot tell
+which of the millions of sites behind it you asked for.
+
+### The DNS half is not optional
+
+ECH and secure DNS are one mechanism, not two features. Your browser has to
+fetch that `HTTPS` record to learn the key at all — so if the lookup travels in
+plaintext, the name leaks there instead and the key can be stripped by anyone
+who wants to force a fallback. Firefox will not even attempt ECH with TRR
+disabled. This is why `ech-browsers.sh` sets both together, and why turning on
+"ECH" alone in `about:config` accomplishes nothing.
+
+### What it does not do
+
+Worth being straight about, because ECH is easy to oversell:
+
+- **Your IP address is still visible.** Behind a large CDN that reveals little,
+  since thousands of sites share the address. A site on a dedicated IP is
+  identified by the IP alone, and ECH does not help.
+- **It needs the site's cooperation.** Only sites publishing an ECH config get
+  the protection. Cloudflare-fronted sites largely do; much of the web does not
+  yet.
+- **Traffic analysis survives it.** Sizes and timings still say things.
+- **Some networks block it**, either deliberately or through middleboxes that
+  choke on an unfamiliar handshake.
+
+None of that is an argument against it. ECH removes the cheapest, most widely
+harvested identifier in your traffic, at no cost to you once it is on. It raises
+the price of passive surveillance from "read the field" to "run real analysis" —
+and that difference is most of what privacy engineering ever buys.
+
+### What this suite does about it
+
+| | |
+|---|---|
+| **Check** | `checkdns` tests both layers — whether the DNS `HTTPS` record carries an ECHConfig, and whether a real TLS handshake with ECH succeeds. |
+| **Get a capable client** | `ech-build.sh` builds an ECH-capable curl, because no distribution ships one — no released OpenSSL implements ECH yet. |
+| **Turn it on** | `ech-browsers.sh` enables ECH and the secure DNS it depends on in every browser on the machine. |
+
+Verify any of it at [defo.ie/ech-check.php](https://defo.ie/ech-check.php).
+
+---
+
 ## Quick start
 
 ```bash
