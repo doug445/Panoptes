@@ -154,25 +154,25 @@ Nothing installs a service or changes your system until you ask it to.
 #### The two tray toggles
 
 `dns-tray` and `warp-tray` put one-click control of the resolver and the tunnel
-in the system tray. Both follow the same convention: **green means active, red
-means not active**, a left-click flips the state, and a desktop notification
+in the system tray. A left-click flips the state and a desktop notification
 confirms what happened.
 
-Note that "not active" means different things for the two. `dns-tray` never
-turns DNS off — it switches between two encrypted resolvers, so red there means
-*the other resolver*, not "no DNS". `warp-tray` red means the tunnel really is
-down.
+The two use different colour conventions, on purpose. `warp-tray` is a real
+on/off switch, so it is **green for connected, red for down**. `dns-tray` is
+not: it never turns DNS off, it swaps one encrypted resolver for another. Its
+off state is therefore a **yellow `C` shield for Cloudflare**, not a red one —
+nothing is broken or unprotected, you are simply on the other resolver.
 
 ![The dns-tray and warp-tray applets in a KDE system tray, magnified, with each
-icon labelled and its green and red states shown side by side](docs/images/tray-toggles.png)
+icon labelled and its two states shown side by side](docs/images/tray-toggles.png)
 
-**`dns-tray` — the green `AG` shield.** A left-click runs `dns-toggle`, which
+**`dns-tray` — the `AG` / `C` shield.** A left-click runs `dns-toggle`, which
 flips `systemd-resolved` between two encrypted resolvers:
 
 | State | Resolver | What it gives you |
 |---|---|---|
-| 🟢 green | AdGuard `94.140.14.14` / `.15.15` over DoT | Ad and tracker filtering at the DNS layer |
-| 🔴 red | Cloudflare `1.1.1.2` security over DoT | Malware filtering, no ad blocking, usually faster |
+| 🟢 green `AG` | AdGuard `94.140.14.14` / `.15.15` over DoT | Ad and tracker filtering at the DNS layer |
+| 🟡 yellow `C` | Cloudflare `1.1.1.2` security over DoT | Malware filtering, no ad blocking, usually faster |
 
 Both lists also end with Quad9 (`9.9.9.9`) as a cross-provider failover, because
 `FallbackDNS=` cannot do that job — see the note below.
