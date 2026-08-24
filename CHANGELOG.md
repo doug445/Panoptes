@@ -3,6 +3,25 @@
 All notable changes to Panoptes are recorded here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.4.0] — 2026-08-24
+
+### Changed
+
+- **`dns-tray`'s off state is a yellow `C` shield, not a red `AG` one.** The red
+  icon said "something is wrong". Nothing is: the toggle never turns DNS off, it
+  moves `systemd-resolved` from AdGuard to Cloudflare `1.1.1.2` security, which
+  is just as encrypted and DNSSEC-validated. Red is now reserved for
+  `warp-tray`, where the tunnel really can be down. The new icon names the
+  resolver you are actually on instead of colour-coding it as a fault.
+- `dns-tray`'s tooltip and notification named neither resolver, and the off-state
+  notification claimed "using default DNS" — which was never true. Both states
+  now report the resolver and the address: *AdGuard 94.140.14.14 — ad and
+  tracker filtering* / *Cloudflare 1.1.1.2 — malware filtering, no ad blocking*.
+- `share/icons/adguard-red.svg` removed; `share/icons/cloudflare-shield.svg`
+  added. Nothing loaded the red icon after this change. `install.sh` globs the
+  icon directory, so no change was needed there, but a stale `adguard-red.svg`
+  left by an earlier install is harmless and can be deleted by hand.
+
 ## [2.0.0] — 2026-08-23
 
 Panoptes gains a TLS arm and stops assuming you have already installed its
@@ -226,6 +245,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[2.4.0]: https://github.com/doug445/Panoptes/releases/tag/v2.4.0
 [2.3.1]: https://github.com/doug445/Panoptes/releases/tag/v2.3.1
 [2.3.0]: https://github.com/doug445/Panoptes/releases/tag/v2.3.0
 [2.2.1]: https://github.com/doug445/Panoptes/releases/tag/v2.2.1
