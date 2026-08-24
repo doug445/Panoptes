@@ -260,6 +260,56 @@ getting software that can speak ECH, and switching it on.
 
 ---
 
+## Captive portals: hotel, airport and public Wi-Fi
+
+**A hardened stack cannot log in to a captive portal.** This is the single most
+common way Panoptes will appear to have broken your internet, and it is worth
+reading before you travel rather than from a hotel lobby.
+
+Every layer this suite adds is a layer the portal needs to reach you through:
+
+| Layer | Why the portal fails |
+|---|---|
+| **Cloudflare WARP** | The tunnel carries your traffic straight past the portal. The portal never sees a request to intercept, so the login page never appears — you get a dead connection, not a redirect. **WARP must come down before you can log in.** |
+| **DNS-over-TLS** | The portal hijacks plain DNS to force you at its login page. It cannot touch an encrypted query, so the redirect never happens. |
+| **MAC randomization** | Every reconnect looks like a brand-new client, so the authorisation you just completed does not apply to you any more. You log in, you get dropped, you log in again. |
+| **`ipv4.ignore-auto-dns`** | The network's own resolver — the thing doing the redirecting — is discarded. |
+| **NM connectivity checking off** | NetworkManager never probes, so the desktop's "Sign in to network" prompt never fires. |
+
+### The order that works
+
+Turn the hardening off, get through the portal, turn it back on:
+
+```bash
+sudo netmaster portal    # WARP down, plain DNS, stable MAC, accept their DNS
+```
+
+Then open `http://<gateway>/` in a browser and complete the login. `netmaster
+portal` prints the gateway address and tests the redirect for you. Once the
+portal has actually let you onto the internet — check it, do not assume —
+restore everything:
+
+```bash
+sudo netmaster restore
+```
+
+**Reconnect WARP only after the portal has authorised you.** Bringing the
+tunnel up first puts you back where you started: the portal cannot see your
+traffic, and it will never present the login page.
+
+If you would rather do it by hand, the minimum is WARP down:
+
+```bash
+sudo warp-killswitch down    # ... log in at the portal ...
+sudo warp-killswitch up      # only once you are actually online
+```
+
+`netmaster diagnose` detects this situation and names it: it reports a
+**portal-blind stack** when your own hardening is what is preventing you from
+ever seeing the login page.
+
+---
+
 ## How it compares
 
 | | Panoptes | `nmcli` / `resolvectl` | Wireshark | Fail2ban |
@@ -286,12 +336,54 @@ sudo ./install.sh --dns-only   # just the DNS tools
 sudo ./install.sh --ech-only   # just the ECH tools
 sudo ./install.sh --deps-only  # only resolve dependencies, install no tools
 sudo ./install.sh --no-deps    # skip the dependency check
+sudo ./install.sh --no-mac-random   # skip the Wi-Fi MAC randomization drop-in
 ./install.sh --user            # user tools only, no sudo, into ~/.local/bin
 sudo ./uninstall.sh            # removes everything it installed
 ```
 
 System tools land in `/usr/local/bin`, user tools and tray applets in
 `~/.local/bin`. Nothing is enabled as a service automatically.
+
+### Wi-Fi MAC randomization
+
+A full `sudo ./install.sh` also writes one NetworkManager drop-in,
+`/etc/NetworkManager/conf.d/mac-randomization.conf`, so the Wi-Fi MAC changes
+per scan and per connection and an access point cannot recognize your machine
+across visits. It is the only file Panoptes puts outside a `bin` directory.
+
+**NetworkManager is not restarted.** A restart drops every connection, which is
+a poor thing to do in the middle of an install and can strand the default route
+on a machine whose routing belongs to a VPN tunnel. The drop-in takes effect on
+your next reboot, or immediately with:
+
+```bash
+sudo systemctl restart NetworkManager
+```
+
+Two things to know before you leave it on:
+
+- **Captive portals stop working.** Every reconnect looks like a new client, so
+  hotel and airport logins never stick. `netmaster` detects this and says so —
+  see [Captive portals](#captive-portals-hotel-airport-and-public-wi-fi) for the way
+  through one.
+- **It is declined on drivers that cannot cope with a cloned MAC.** `wl`,
+  `b43`, `b43legacy` and `brcmsmac` — Intel Macs and older Broadcom laptops —
+  take the MAC from the chip: NetworkManager clones it, association fails, and
+  you are left with no Wi-Fi. The installer names the interface and driver,
+  prints why, and writes nothing. The test is the driver, not the vendor, so
+  `brcmfmac` Broadcom parts (Apple Silicon BCM4377/4387, and the SDIO parts on
+  single-board machines) are not skipped — they clone correctly.
+
+To opt out entirely, install with `--no-mac-random`. To keep randomization but
+pin one network to your real MAC:
+
+```bash
+sudo nmcli con mod <NAME> 802-11-wireless.cloned-mac-address permanent
+```
+
+`netcheck` reports the current state per adapter. `wifi-recover.sh` undoes the
+whole thing if a card turns out not to cope. `uninstall.sh` removes the drop-in
+only if it is still byte-for-byte the file Panoptes shipped.
 
 ### Dependencies
 
@@ -404,6 +496,14 @@ probesource 203.0.113.42        # IPv4 or IPv6
 
 You still choose the investigation mode, so nothing is sent to the target
 until you pick one — `All passive` never emits a packet to it at all.
+
+### I am at a hotel and the Wi-Fi login page never appears.
+
+Your own hardening is hiding it — most likely WARP, which tunnels straight past
+the portal so it never gets a request to redirect. Run `sudo netmaster portal`,
+log in at the gateway it prints, confirm you are actually online, then `sudo
+netmaster restore`. Do not bring WARP back up before the portal has authorised
+you. See [Captive portals](#captive-portals-hotel-airport-and-public-wi-fi).
 
 ### Cloudflare WARP broke my internet. How do I get out?
 
