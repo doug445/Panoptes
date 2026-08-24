@@ -2,22 +2,31 @@
 
 ## Supported Versions
 
-Panoptes has no tagged releases yet. `main` is the only supported line, and
-fixes land there.
+Panoptes is maintained by one person and carries no backport branches. Fixes
+land on `main` and go out in the next tagged release. Only the newest release
+is supported; there is no long-term-support line and older tags do not receive
+patches.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| `main`  | :white_check_mark: |
-| any older checkout | :x:     |
+| Version | Supported |
+| ------- | --------- |
+| `main` | :white_check_mark: fixes land here first |
+| Newest tagged release | :white_check_mark: |
+| Any earlier tag | :x: upgrade to the newest release |
+
+The [releases page](https://github.com/doug445/Panoptes/releases) lists every
+tag, newest first, and [`CHANGELOG.md`](CHANGELOG.md) records what changed in
+each one.
 
 If you are running a checkout you pulled weeks ago, `git pull` and retry before
-reporting — the issue may already be fixed. Include the commit you are on:
+reporting — the issue may already be fixed. Include what you are running:
 
 ```bash
-git -C /path/to/Panoptes rev-parse --short HEAD
+git -C /path/to/Panoptes describe --tags --always --dirty
 ```
 
-Once the first tag exists this table will list versions instead.
+A `-dirty` suffix means the working tree has local modifications, and a hash
+with no tag means the checkout is somewhere between releases. Say so in the
+report either way — it changes what I can reproduce.
 
 ## Reporting a Vulnerability
 
@@ -57,6 +66,16 @@ programs. That is the interesting surface:
 * **Anything that writes outside its documented paths**, or that a read-only
   tool writes at all. `audit-dns.sh`, `netcheck`, `nettop`, `checkdns`,
   `dns-status.sh` and `wifi-recover.sh` without `--repair` must change nothing.
+* **The installers fetching or trusting the wrong thing.** `panoptes-deps.sh`,
+  `warp-setup.sh`, `ech-build.sh` and `ech-browsers.sh` all run as root and pull
+  in software: a repository added without `gpgcheck`, an unverified tarball, a
+  source tree taken from the wrong ref, or a browser profile edited outside the
+  documented paths.
+* **`ech-build.sh` shadowing the system TLS stack.** It installs curl into
+  `/usr/local/bin`, which precedes `/usr/bin` on `PATH` — including root's
+  `secure_path` — so it silently becomes the curl every script on the machine
+  gets. Anything that widens that beyond curl, or that leaves the development
+  OpenSSL linkable by other programs, is a finding.
 
 ## What is out of scope
 
@@ -68,6 +87,10 @@ programs. That is the interesting surface:
 * **The investigation tools revealing information about your own network.** That
   is what they are for.
 * **Missing optional dependencies** degrading a tactic to unavailable.
+* **Bugs in the OpenSSL ECH branch itself.** `ech-build.sh` builds an unreleased
+  upstream branch, on purpose, because no released OpenSSL implements ECH. Flaws
+  in that code belong upstream; how Panoptes builds, isolates and installs it
+  is in scope.
 
 ## Before you send diagnostics
 
