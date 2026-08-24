@@ -63,24 +63,28 @@ if 'kde' in desktop:
             on = check_status()
             do_toggle()
             if on:
-                subprocess.Popen(['notify-send', 'AdGuard DNS', 'Disabled — using default DNS', '--icon=security-low'])
+                subprocess.Popen(['notify-send', 'DNS resolver',
+                              'Cloudflare 1.1.1.2 — malware filtering, no ad blocking',
+                              '--icon=security-medium'])
             else:
-                subprocess.Popen(['notify-send', 'AdGuard DNS', 'Enabled — encrypted DNS active', '--icon=security-high'])
+                subprocess.Popen(['notify-send', 'DNS resolver',
+                              'AdGuard 94.140.14.14 — ad and tracker filtering',
+                              '--icon=security-high'])
             QTimer.singleShot(2000, update_ui)
 
     def update_ui():
         if check_status():
-            tray.setIcon(icon_on)
-            tray.setToolTip("AdGuard DNS on")
+            tray.setIcon(icon_ag)
+            tray.setToolTip("AdGuard DNS — 94.140.14.14, DoT")
         else:
-            tray.setIcon(icon_off)
-            tray.setToolTip("AdGuard DNS off")
+            tray.setIcon(icon_cf)
+            tray.setToolTip("Cloudflare 1.1.1.2 security — DoT")
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     home = os.path.expanduser('~')
-    icon_on  = QIcon(f"{home}/.local/share/icons/adguard-green.svg")
-    icon_off = QIcon(f"{home}/.local/share/icons/adguard-red.svg")
+    icon_ag = QIcon(f"{home}/.local/share/icons/adguard-green.svg")
+    icon_cf = QIcon(f"{home}/.local/share/icons/cloudflare-shield.svg")
     tray = QSystemTrayIcon()
     update_ui()
     tray.setVisible(True)
@@ -103,26 +107,30 @@ elif 'cinnamon' in desktop or 'x-cinnamon' in desktop:
         on = check_status()
         do_toggle()
         if on:
-            subprocess.Popen(['notify-send', 'AdGuard DNS', 'Disabled — using default DNS', '--icon=security-low'])
+            subprocess.Popen(['notify-send', 'DNS resolver',
+                              'Cloudflare 1.1.1.2 — malware filtering, no ad blocking',
+                              '--icon=security-medium'])
         else:
-            subprocess.Popen(['notify-send', 'AdGuard DNS', 'Enabled — encrypted DNS active', '--icon=security-high'])
+            subprocess.Popen(['notify-send', 'DNS resolver',
+                              'AdGuard 94.140.14.14 — ad and tracker filtering',
+                              '--icon=security-high'])
         GLib.timeout_add(2000, lambda: update_ui() or GLib.SOURCE_REMOVE)
 
     def update_ui():
         if check_status():
-            icon.set_icon_name(icon_on)
-            icon.set_tooltip_text("AdGuard DNS on")
+            icon.set_icon_name(icon_ag)
+            icon.set_tooltip_text("AdGuard DNS — 94.140.14.14, DoT")
         else:
-            icon.set_icon_name(icon_off)
-            icon.set_tooltip_text("AdGuard DNS off")
+            icon.set_icon_name(icon_cf)
+            icon.set_tooltip_text("Cloudflare 1.1.1.2 security — DoT")
 
     def poll_status():
         update_ui()
         return GLib.SOURCE_CONTINUE
 
     home = os.path.expanduser('~')
-    icon_on  = f"{home}/.local/share/icons/adguard-green.svg"
-    icon_off = f"{home}/.local/share/icons/adguard-red.svg"
+    icon_ag = f"{home}/.local/share/icons/adguard-green.svg"
+    icon_cf = f"{home}/.local/share/icons/cloudflare-shield.svg"
     icon = XApp.StatusIcon()
     icon.connect("button-release-event", on_click)
     update_ui()
