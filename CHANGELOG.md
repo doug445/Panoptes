@@ -3,6 +3,23 @@
 All notable changes to Panoptes are recorded here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.4.1] — 2026-08-24
+
+### Fixed
+
+- **`SECURITY.md` claimed "Panoptes has no tagged releases yet".** It had been
+  wrong since v1.0.0 — there are eight. The supported-versions table now says
+  what is actually true: `main` and the newest tagged release, no backport
+  branches, no LTS line. It links the releases page and the changelog instead of
+  naming a version that goes stale, and asks reporters for
+  `git describe --tags --always --dirty` rather than a bare commit hash.
+- `SECURITY.md`'s in-scope list predated the ECH and installer tools. Added the
+  four root-level installers (`panoptes-deps.sh`, `warp-setup.sh`,
+  `ech-build.sh`, `ech-browsers.sh`) and the fact that `ech-build.sh` puts curl
+  in `/usr/local/bin`, ahead of `/usr/bin` on every `PATH` including root's
+  `secure_path`. Bugs in the OpenSSL ECH branch itself are called out as
+  upstream's, while how Panoptes builds and isolates it stays in scope.
+
 ## [2.4.0] — 2026-08-24
 
 ### Changed
@@ -245,6 +262,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[2.4.1]: https://github.com/doug445/Panoptes/releases/tag/v2.4.1
 [2.4.0]: https://github.com/doug445/Panoptes/releases/tag/v2.4.0
 [2.3.1]: https://github.com/doug445/Panoptes/releases/tag/v2.3.1
 [2.3.0]: https://github.com/doug445/Panoptes/releases/tag/v2.3.0
