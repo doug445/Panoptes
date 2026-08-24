@@ -3,6 +3,71 @@
 All notable changes to Panoptes are recorded here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.5.0] — 2026-08-24
+
+### Added
+
+- **Wi-Fi MAC randomization is now part of a full install.** Panoptes shipped
+  three tools that *read* or *undo* MAC randomization — `netcheck` reports it,
+  `netmaster` flags it as a captive-portal blocker, `wifi-recover.sh` disables
+  it — but nothing that turned it on. The enabler had been left behind in the
+  predecessor deploy kit. `share/nm/mac-randomization.conf` is now installed to
+  `/etc/NetworkManager/conf.d/` by `sudo ./install.sh`, setting
+  `wifi.scan-rand-mac-address=yes` and `wifi.cloned-mac-address=random` so an
+  access point cannot recognize the machine across visits. Skip it with
+  `--no-mac-random`. This is the only file Panoptes places outside a `bin`
+  directory.
+- **The installer declines MAC randomization on drivers that cannot associate
+  with a cloned MAC.** `wl`, `b43`, `b43legacy` and `brcmsmac` — Intel Macs and
+  older Broadcom laptops — take the MAC from the chip: NetworkManager clones
+  it, association fails, and the machine has no Wi-Fi at all, which is the exact
+  hole `wifi-recover.sh` exists to dig out of. On a match the installer names
+  the interface and driver, explains why, writes nothing, and prints the manual
+  override. The test is the driver rather than the vendor, so `brcmfmac`
+  Broadcom parts — Apple Silicon BCM4377/4387, and the SDIO parts on
+  single-board machines — are not skipped; they clone correctly.
+- `uninstall.sh` removes the drop-in, but only when it is still byte-for-byte
+  the file Panoptes shipped; an edited or pre-existing file is left alone and
+  reported. A config displaced at install time is saved as
+  `mac-randomization.conf.pre-panoptes` — deliberately not a `.conf` suffix, as
+  NetworkManager reads only `*.conf` from `conf.d` — and is put back on
+  uninstall.
+
+### Fixed
+
+- `uninstall.sh` never removed `warp-setup.sh`. It was added to `install.sh`'s
+  system tools without being added to the uninstaller's, so it survived a
+  `sudo ./uninstall.sh` in `/usr/local/bin`.
+
+### Changed
+
+- **`README.md` has a "Captive portals" section.** Hotel, airport and café
+  Wi-Fi is where a hardened stack most convincingly looks broken, and WARP is
+  the layer that does it: the tunnel carries traffic past the portal, so the
+  portal never gets a request to redirect and the login page simply never
+  appears. The section tabulates each layer against the reason the portal
+  fails, then gives the order that works — `sudo netmaster portal`, log in,
+  confirm you are actually online, `sudo netmaster restore` — and states
+  plainly that WARP must not come back up until the portal has authorised you.
+  A FAQ entry and the MAC randomization section both link to it.
+- `SECURITY.md` now covers the drop-in. In scope: the driver guard failing to
+  decline, the file being written when `--no-mac-random` was passed or by a
+  partial install, a displaced config saved somewhere `conf.d` still parses,
+  and `netcheck` reporting MAC privacy the adapter is not actually applying.
+  Out of scope: what a randomized MAC does not hide, and captive portals
+  breaking, which is documented behaviour rather than a bug.
+
+### Notes
+
+- **NetworkManager is not restarted by the installer.** A restart tears down
+  every connection mid-install, and on a machine whose default route belongs to
+  a VPN's adopted tunnel that can strand the route table. Randomization takes
+  effect on the next reboot, or immediately with
+  `sudo systemctl restart NetworkManager`.
+- Captive portals will stop working while randomization is on — every reconnect
+  looks like a new client. Pin a single network back to the real MAC with
+  `nmcli con mod <NAME> 802-11-wireless.cloned-mac-address permanent`.
+
 ## [2.4.1] — 2026-08-24
 
 ### Fixed
@@ -262,6 +327,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[2.5.0]: https://github.com/doug445/Panoptes/releases/tag/v2.5.0
 [2.4.1]: https://github.com/doug445/Panoptes/releases/tag/v2.4.1
 [2.4.0]: https://github.com/doug445/Panoptes/releases/tag/v2.4.0
 [2.3.1]: https://github.com/doug445/Panoptes/releases/tag/v2.3.1

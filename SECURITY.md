@@ -46,7 +46,8 @@ reproduce. Thank you for helping keep this project secure!
 ## What is in scope
 
 These tools install into `/usr/local/bin`, run as root, rewrite resolver
-configuration and firewall state, and feed addresses taken from logs into other
+configuration and firewall state, drop one file into
+`/etc/NetworkManager/conf.d/`, and feed addresses taken from logs into other
 programs. That is the interesting surface:
 
 * **Command injection from untrusted input.** `probesource` takes a target from
@@ -71,6 +72,18 @@ programs. That is the interesting surface:
   in software: a repository added without `gpgcheck`, an unverified tarball, a
   source tree taken from the wrong ref, or a browser profile edited outside the
   documented paths.
+* **The MAC randomization drop-in failing quietly, or landing where it must
+  not.** `install.sh` writes `mac-randomization.conf` into
+  `/etc/NetworkManager/conf.d/`. Three things there are findings: the guard not
+  declining on a Wi-Fi driver that cannot associate with a cloned MAC (`wl`,
+  `b43`, `b43legacy`, `brcmsmac`), which leaves a machine with no Wi-Fi and no
+  obvious cause; the drop-in being written when `--no-mac-random` was passed, or
+  by any mode other than a full install; and a displaced config being saved
+  anywhere NetworkManager will still read it — the `.pre-panoptes` suffix is
+  load-bearing, because `conf.d` parses every `*.conf`. Randomization silently
+  *not* taking effect while the tools report that it has is also in scope:
+  `netcheck` claiming MAC privacy that the adapter is not applying is a false
+  assurance about a privacy control.
 * **`ech-build.sh` shadowing the system TLS stack.** It installs curl into
   `/usr/local/bin`, which precedes `/usr/bin` on `PATH` — including root's
   `secure_path` — so it silently becomes the curl every script on the machine
@@ -87,6 +100,14 @@ programs. That is the interesting surface:
 * **The investigation tools revealing information about your own network.** That
   is what they are for.
 * **Missing optional dependencies** degrading a tactic to unavailable.
+* **What MAC randomization does not hide.** A randomized MAC stops an access
+  point recognizing the adapter across visits. It does not make you anonymous:
+  the portal login, the DHCP hostname, the traffic itself and every layer above
+  link-local still identify you. Captive portals breaking is documented
+  behaviour, not a bug — every reconnect is a new client by design. Drivers
+  outside the declined list that turn out not to handle a cloned MAC are a
+  driver limitation; tell us anyway and the list grows, but the flaw is not
+  Panoptes'.
 * **Bugs in the OpenSSL ECH branch itself.** `ech-build.sh` builds an unreleased
   upstream branch, on purpose, because no released OpenSSL implements ECH. Flaws
   in that code belong upstream; how Panoptes builds, isolates and installs it
