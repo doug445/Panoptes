@@ -109,7 +109,7 @@ and that difference is most of what privacy engineering ever buys.
 | | |
 |---|---|
 | **Check** | `checkdns` tests both layers — whether the DNS `HTTPS` record carries an ECHConfig, and whether a real TLS handshake with ECH succeeds. |
-| **Get a capable client** | `ech-build.sh` builds an ECH-capable curl, because no distribution ships one — no released OpenSSL implements ECH yet. |
+| **Get a capable client** | `ech-build.sh` builds an ECH-capable curl, because distribution curl packages cannot do ECH yet — OpenSSL gained it only in 4.0.0 (April 2026), and distributions still link curl against OpenSSL 3.x (Fedora 44 ships 3.5). |
 | **Turn it on** | `ech-browsers.sh` enables ECH and the secure DNS it depends on in every browser on the machine. |
 
 Verify any of it at [defo.ie/ech-check.php](https://defo.ie/ech-check.php).
@@ -239,7 +239,7 @@ getting software that can speak ECH, and switching it on.
 
 | Tool | What it does |
 |------|--------------|
-| **`ech-build.sh`** | Builds an **ECH-capable curl**, because no distribution ships one — no released OpenSSL implements ECH. Compiles the OpenSSL ECH branch into `/opt/openssl-ech` (static, so nothing else on the system can link it), then curl against it into `/usr/local`. Neither prefix belongs to a package manager, so `dnf upgrade` and `apt full-upgrade` leave the result alone permanently. `--verify` runs a real `--ech hard` handshake, which refuses to fall back to a cleartext SNI, so a pass is a pass. `--uninstall` hands curl back to the distribution. |
+| **`ech-build.sh`** | Builds an **ECH-capable curl**, because distribution curl packages cannot do ECH yet — OpenSSL gained it only in 4.0.0 (April 2026), and distributions still link curl against 3.x. Compiles the OpenSSL ECH branch into `/opt/openssl-ech` (static, so nothing else on the system can link it), then curl against it into `/usr/local`. Neither prefix belongs to a package manager, so `dnf upgrade` and `apt full-upgrade` leave the result alone permanently. `--verify` runs a real `--ech hard` handshake, which refuses to fall back to a cleartext SNI, so a pass is a pass. `--uninstall` hands curl back to the distribution. |
 | **`ech-browsers.sh`** | Finds **every browser on the machine** — native, Flatpak and Snap, Firefox-family and Chromium-family — and enables ECH plus the secure DNS it depends on. Firefox-family settings go into `user.js`, so they survive a preferences reset; Chromium-family settings go into `Local State`. Idempotent, backs up every file it touches, and `--revert` undoes all of it. Skips config directories left behind by uninstalled browsers, and **never touches Tor Browser or Mullvad Browser** — those resolve through their proxy circuit on purpose, and pointing them at a DoH resolver would send lookups around it. |
 
 ### Setup
@@ -427,7 +427,7 @@ touching your system.
 Run `sudo audit-dns.sh`. It enumerates every mechanism that can set a resolver —
 `systemd-resolved` global and per-link, NetworkManager per-connection overrides,
 `/etc/resolv.conf` and what it points at, and pushed-DNS lines inside WireGuard
-and OpenVPN configs — then tells you which one is actually winning. Most "leaks"
+and OpenVPN configs — side by side, so you can see which one is in effect. Most "leaks"
 are a per-link resolver from DHCP quietly outranking your global setting.
 
 ### How do I know if DNS-over-TLS or DNSSEC is actually working?
@@ -447,8 +447,9 @@ false failure. When it does, `ech-build.sh` builds you one (below), and
 
 ### How do I get a curl that supports ECH on Linux?
 
-Build one — no distribution ships it, because no released OpenSSL implements
-ECH yet. `ech-build.sh` does the whole job:
+Build one. Distribution curl packages cannot do ECH yet: OpenSSL gained it only
+in 4.0.0 (April 2026), and distributions still link curl against OpenSSL 3.x.
+`ech-build.sh` does the whole job:
 
 ```bash
 sudo ./ech-build.sh --deps    # install the build dependencies

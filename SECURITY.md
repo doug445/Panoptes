@@ -108,8 +108,9 @@ programs. That is the interesting surface:
   outside the declined list that turn out not to handle a cloned MAC are a
   driver limitation; tell us anyway and the list grows, but the flaw is not
   Panoptes'.
-* **Bugs in the OpenSSL ECH branch itself.** `ech-build.sh` builds an unreleased
-  upstream branch, on purpose, because no released OpenSSL implements ECH. Flaws
+* **Bugs in the OpenSSL ECH branch itself.** `ech-build.sh` builds an upstream
+  OpenSSL ECH branch rather than a release; it was written before OpenSSL
+  4.0.0 (April 2026), the first release with ECH. Flaws
   in that code belong upstream; how Panoptes builds, isolates and installs it
   is in scope.
 
