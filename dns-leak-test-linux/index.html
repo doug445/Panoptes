@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DNS Leak Test on Linux: Which DNS Server Am I Using?</title>
+<meta name="description" content="Test for DNS leaks on Linux with resolvectl and tcpdump: see which server each link uses, why VPN and DHCP DNS leak, and confirm DNSSEC and DNS-over-TLS.">
+<link rel="canonical" href="https://doug445.github.io/Panoptes/dns-leak-test-linux/">
+<meta name="author" content="William MacKinnon">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="../style.css">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Panoptes">
+<meta property="og:title" content="DNS Leak Test on Linux: Which DNS Server Am I Using?">
+<meta property="og:description" content="Test for DNS leaks on Linux with resolvectl and tcpdump: see which server each link uses, why VPN and DHCP DNS leak, and confirm DNSSEC and DNS-over-TLS.">
+<meta property="og:url" content="https://doug445.github.io/Panoptes/dns-leak-test-linux/">
+<meta property="og:image" content="https://doug445.github.io/Panoptes/card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="article:published_time" content="2026-10-14">
+<meta property="article:modified_time" content="2026-10-14">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "TechArticle",
+      "headline": "DNS leak test on Linux: which DNS server am I actually using?",
+      "description": "Test for DNS leaks on Linux with resolvectl and tcpdump: see which server each link uses, why VPN and DHCP DNS leak, and confirm DNSSEC and DNS-over-TLS.",
+      "datePublished": "2026-10-14",
+      "dateModified": "2026-10-14",
+      "image": "https://doug445.github.io/Panoptes/card.png",
+      "author": { "@type": "Person", "name": "William MacKinnon", "url": "https://github.com/doug445" },
+      "mainEntityOfPage": "https://doug445.github.io/Panoptes/dns-leak-test-linux/",
+      "about": { "@type": "SoftwareApplication", "name": "Panoptes", "url": "https://doug445.github.io/Panoptes/", "applicationCategory": "SecurityApplication", "operatingSystem": "Linux" }
+    },
+    {
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        { "@type": "ListItem", "position": 1, "name": "Panoptes", "item": "https://doug445.github.io/Panoptes/" },
+        { "@type": "ListItem", "position": 2, "name": "DNS leak test", "item": "https://doug445.github.io/Panoptes/dns-leak-test-linux/" }
+      ]
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        { "@type": "Question", "name": "How do I see which DNS server Linux is using?", "acceptedAnswer": { "@type": "Answer", "text": "Run resolvectl status. It lists the global servers and, separately, the servers on each network link, with the one in use shown as Current DNS Server. To see which link answered a particular lookup, run resolvectl query --cache=no example.com." } },
+        { "@type": "Question", "name": "Why does my VPN leak DNS on Linux?", "acceptedAnswer": { "@type": "Answer", "text": "systemd-resolved keeps DNS servers per link. If your Wi-Fi link still has DHCP-provided servers and is still a default route, lookups go to it as well as to the VPN. For a NetworkManager VPN, set ipv4.dns-priority and ipv6.dns-priority to a negative value such as -50 on the VPN profile and reconnect." } },
+        { "@type": "Question", "name": "Is FallbackDNS a backup if my DNS server goes down?", "acceptedAnswer": { "@type": "Answer", "text": "No. resolved.conf(5) says FallbackDNS is only used if no other DNS server information is known. If you want failover, list the extra servers in DNS= itself." } },
+        { "@type": "Question", "name": "How do I know DNSSEC is actually validating?", "acceptedAnswer": { "@type": "Answer", "text": "Run resolvectl query example.com and look for Data is authenticated: yes. Then query dnssec-failed.org, which is deliberately broken: with validation on, it fails with DNSSEC validation failed." } },
+        { "@type": "Question", "name": "Does DNSOverTLS=opportunistic protect me?", "acceptedAnswer": { "@type": "Answer", "text": "Only against passive snooping, and only when TLS works. In opportunistic mode systemd-resolved falls back to plain DNS if TLS fails and cannot authenticate the server. Use DNSOverTLS=yes with a #hostname on each server if you need it enforced." } }
+      ]
+    }
+  ]
+}
+</script>
+</head>
+<body>
+
+<nav class="sitenav" aria-label="Site">
+  <div class="wrap">
+    <a class="brand" href="../">Panoptes</a>
+    <a href="../wifi-connected-no-internet-linux/">Wi-Fi: no internet</a>
+    <a href="../dns-leak-test-linux/">DNS leak test</a>
+    <a href="../encrypted-client-hello-linux/">ECH on Linux</a>
+    <a href="https://github.com/doug445/Panoptes">GitHub</a>
+  </div>
+</nav>
+
+<main class="wrap">
+<p class="crumbs"><a href="../">Panoptes</a> › DNS leak test</p>
+<h1>DNS leak test on Linux: which DNS server am I actually using?</h1>
+<p class="lede">You set a resolver, maybe turned on DNS-over-TLS, maybe connected a VPN, and a leak-test site still shows your ISP. On a systemd-resolved system the answer is rarely one setting. Every network link can bring its own DNS servers. This page shows how to see which server really answered, how to watch the wire for plaintext DNS, how to confirm DNSSEC and DNS-over-TLS, and how to fix each kind of leak.</p>
+
+<h2 id="how-it-leaks">How DNS leaks happen with systemd-resolved</h2>
+<p>On distributions that use <code>systemd-resolved</code>, such as Fedora and Ubuntu, names are resolved through it, fed by NetworkManager. The resolver does not have one DNS server. It has a global list from <code>/etc/systemd/resolved.conf</code> plus a separate list on every link: your Wi-Fi, your Ethernet, your VPN tunnel. Per <code>systemd-resolved.service(8)</code>:</p>
+<ul>
+<li>A name that matches a link's routing domain goes to that link's servers. If more than one link has the same best match, the query goes to all of them.</li>
+<li>A name that matches no routing domain goes to the servers on every link marked as a default route, <em>and</em> to the global servers.</li>
+</ul>
+<p>So the classic leaks are:</p>
+<ul>
+<li><strong>DHCP overrides you.</strong> You configured a resolver globally, but the router handed out its own (often the ISP's) by DHCP. That server sits on the Wi-Fi link and gets queries too.</li>
+<li><strong>The VPN does not take over DNS.</strong> The tunnel link has the VPN's resolver, but the Wi-Fi link still has its DHCP servers and is still a default route, so lookups go out both ways.</li>
+<li><strong>Something bypasses the resolver.</strong> <code>/etc/resolv.conf</code> is a plain file listing other servers, or a program has its own DNS client. Firefox and Chrome with DNS-over-HTTPS turned on send lookups straight to the browser's chosen resolver instead of <code>systemd-resolved</code>, so a browser-based leak test describes the browser, not the system.</li>
+</ul>
+
+<h2 id="see-configured">Step 1: see which servers are configured, per link</h2>
+<div class="codeblock"><pre><code>resolvectl status
+resolvectl dns
+resolvectl domain
+ls -l /etc/resolv.conf</code></pre></div>
+<p>Read <code>resolvectl status</code> section by section: <code>Global</code> first, then one <code>Link</code> block per interface. In each block:</p>
+<ul>
+<li><code>Current DNS Server</code> and <code>DNS Servers</code> are the addresses that link will use. A server written <code>1.1.1.1#cloudflare-dns.com</code> carries a TLS hostname for DNS-over-TLS.</li>
+<li>The <code>Protocols:</code> line shows <code>+DefaultRoute</code> or <code>-DefaultRoute</code>, plus <code>DNSOverTLS=</code> and <code>DNSSEC=</code> modes. A link with <code>+DefaultRoute</code> and its own servers will receive ordinary lookups.</li>
+<li><code>resolv.conf mode: stub</code> means programs that read <code>/etc/resolv.conf</code> are sent to the local stub at <code>127.0.0.53</code>, and so through <code>systemd-resolved</code>.</li>
+</ul>
+<p><code>/etc/resolv.conf</code> should be a symlink to <code>/run/systemd/resolve/stub-resolv.conf</code>. If it is a regular file listing other <code>nameserver</code> lines, programs that read it skip <code>systemd-resolved</code> entirely.</p>
+
+<h2 id="see-answers">Step 2: see which link actually answered</h2>
+<div class="codeblock"><pre><code>resolvectl query --cache=no example.com</code></pre></div>
+<p><code>--cache=no</code> sends the lookup to the network instead of answering from cache. Recent versions of <code>resolvectl</code> mark each address with the link the answer came through (<code>-- link: wlan0</code>) and end with lines like these:</p>
+<div class="codeblock"><pre><code>-- Information acquired via protocol DNS in 359.2ms.
+-- Data is authenticated: yes; Data was acquired via local or encrypted transport: yes
+-- Data from: network</code></pre></div>
+<p>With a VPN up, answers should come through the tunnel interface, not your Wi-Fi or Ethernet link. Older systemd versions print only <code>Data is authenticated</code>.</p>
+
+<h2 id="watch-the-wire">Step 3: watch the wire for plaintext DNS</h2>
+<p>Configuration tells you what should happen. A packet capture tells you what does. Capture on the physical interface, not on <code>any</code>, so the stub's traffic on loopback does not confuse things:</p>
+<div class="codeblock"><pre><code>sudo tcpdump -ni wlan0 'port 53'
+sudo tcpdump -ni wlan0 'port 853'</code></pre></div>
+<p>Leave one running and, in another terminal, run <code>resolvectl query --cache=no example.org</code>.</p>
+<ul>
+<li>Packets on port 53 on the physical interface are plaintext DNS. If you expect DNS-over-TLS or a VPN to carry your lookups, that is a leak, and the destination address shows which server got it.</li>
+<li>Packets on port 853 are DNS-over-TLS.</li>
+<li>With a full-tunnel VPN up, you should see neither on the physical interface, only the VPN's own encrypted traffic.</li>
+</ul>
+
+<h2 id="dnssec">Check that DNSSEC is really validating</h2>
+<div class="codeblock"><pre><code>resolvectl query example.com
+resolvectl query dnssec-failed.org
+dig +short dnssec-failed.org
+dig +short +cd dnssec-failed.org
+resolvectl statistics</code></pre></div>
+<ul>
+<li><code>example.com</code> is signed, so the answer should end with <code>Data is authenticated: yes</code>. That line means <code>systemd-resolved</code> validated it locally.</li>
+<li><code>dnssec-failed.org</code> is deliberately misconfigured. With validation on, <code>resolvectl</code> reports <code>DNSSEC validation failed</code> (the reason after it can vary), and plain <code>dig</code> returns nothing.</li>
+<li><code>dig +cd</code> sets "checking disabled". If that returns an address while the plain query returns nothing, the failure is DNSSEC, not a dead domain.</li>
+<li><code>resolvectl statistics</code> counts Secure, Insecure and Bogus verdicts. If they stay at zero after lookups through the resolver, nothing is being validated.</li>
+</ul>
+<p>One caveat: many public resolvers validate DNSSEC themselves and refuse bogus answers. A failed <code>dnssec-failed.org</code> lookup proves validation is happening somewhere, but only <code>Data is authenticated: yes</code> proves your own machine is doing it.</p>
+<p>The setting is <code>DNSSEC=</code> in <code>resolved.conf</code>. The default is <code>allow-downgrade</code>, which turns validation off when a server does not support DNSSEC. <code>resolved.conf(5)</code> warns that this allows downgrade attacks. <code>yes</code> makes invalid answers fail.</p>
+
+<h2 id="dot">Check that DNS-over-TLS is really in use</h2>
+<ul>
+<li><code>resolvectl status</code> shows <code>DNSOverTLS=yes</code> or <code>DNSOverTLS=opportunistic</code> on the relevant <code>Protocols:</code> line, and the server is written with a <code>#hostname</code>.</li>
+<li><code>resolvectl query --cache=no</code> reports <code>Data was acquired via local or encrypted transport: yes</code>.</li>
+<li>The capture above shows port 853 traffic to your resolver and no port 53.</li>
+</ul>
+<div class="note"><p><strong>Opportunistic is not enforced.</strong> With <code>DNSOverTLS=opportunistic</code>, <code>systemd-resolved</code> tries TLS but falls back to plain UDP if the server, or anything in between, does not cooperate, and it cannot authenticate the server. <code>DNSOverTLS=yes</code> encrypts every query and fails if TLS is not available. Give each server its TLS hostname (<code>#dns.quad9.net</code>) so the certificate is checked against a name instead of an IP address.</p></div>
+
+<h2 id="fixes">Fixes</h2>
+<h3>Stop DHCP from handing you its DNS servers</h3>
+<div class="codeblock"><pre><code>nmcli connection show
+sudo nmcli connection modify "NAME" ipv4.ignore-auto-dns yes ipv6.ignore-auto-dns yes
+sudo nmcli connection up "NAME"</code></pre></div>
+<p>With <code>ignore-auto-dns</code>, NetworkManager drops the name servers and search domains from DHCP and uses only the ones set on the profile, if any. Make sure you have set servers somewhere first, either in <code>ipv4.dns</code> on the profile or globally (next step). The cost: captive portals that redirect through their own DNS stop working on that network.</p>
+
+<h3>Set an encrypted, validating resolver globally</h3>
+<div class="codeblock"><pre><code>sudo mkdir -p /etc/systemd/resolved.conf.d
+printf '[Resolve]\nDNS=9.9.9.9#dns.quad9.net 1.1.1.1#cloudflare-dns.com\nDNSOverTLS=yes\nDNSSEC=yes\nDomains=~.\n' | sudo tee /etc/systemd/resolved.conf.d/90-encrypted-dns.conf
+sudo systemctl restart systemd-resolved</code></pre></div>
+<p><code>Domains=~.</code> makes these servers a match for every name. On its own it does not stop per-link servers being asked too: NetworkManager adds <code>~.</code> to the connection that holds the default route, and an equal match is sent to every server that has it. Removing the DHCP servers from the link, as above, is what leaves the global servers as the only candidates. Also note that <code>FallbackDNS=</code> is not a failover. It is used only when no other server is known, so put every resolver you want to fail over to in <code>DNS=</code>.</p>
+
+<h3>Make a NetworkManager VPN's DNS exclusive</h3>
+<div class="codeblock"><pre><code>sudo nmcli connection modify "VPN-NAME" ipv4.dns-priority -50 ipv6.dns-priority -50
+sudo nmcli connection up "VPN-NAME"</code></pre></div>
+<p>Lower values win. VPN profiles default to 50 and other connections to 100. A negative value excludes every configuration with a higher number, so only the VPN's servers are used while it is up. <code>nm-settings-nmcli(5)</code> describes setting the profile you want to the most negative value as the way to avoid DNS leaks. VPNs that NetworkManager does not run (<code>wg-quick</code>, a bare <code>openvpn</code>) set DNS from their own config. Look for <code>DNS =</code> in WireGuard configs and <code>dhcp-option DNS</code> or an <code>update-systemd-resolved</code> hook in OpenVPN configs.</p>
+
+<h3>Put /etc/resolv.conf back on the stub</h3>
+<div class="codeblock"><pre><code>sudo ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf</code></pre></div>
+<p>Do this only if nothing else (resolvconf, openresolv, a VPN script) is meant to own the file.</p>
+
+<div class="tool"><p><strong>Automated:</strong> <code>sudo audit-dns.sh</code> from <a href="https://github.com/doug445/Panoptes">Panoptes</a> prints, read-only, every place on the machine that can set a resolver: the active resolver services, where <code>/etc/resolv.conf</code> points and what it lists, <code>resolvectl</code>'s servers and DoT/DNSSEC modes, NetworkManager drop-ins and per-connection <code>ignore-auto-dns</code>, systemd-networkd and dhclient overrides, <code>resolved.conf</code> with its drop-ins and <code>chattr</code> lock, and DNS directives in OpenVPN and WireGuard configs. Run it as root, because VPN configs are usually mode 600. <code>checkdns</code> shows <code>resolvectl status</code> with each AdGuard, Cloudflare and Quad9 address labelled by provider, alongside WARP and Avahi state. <code>harden-dns.sh --dry-run</code> previews the fix: DoT with hostname pinning, DNSSEC, <code>Domains=~.</code>, <code>ignore-auto-dns</code> on every connection and an immutable <code>resolved.conf</code>. Its default resolvers are AdGuard with Quad9 and Cloudflare as fallback, and you can change them with the <code>PRIMARY_DNS</code> and <code>FALLBACK_DNS</code> environment variables.</p></div>
+
+<h2 id="faq">FAQ</h2>
+<details><summary>How do I see which DNS server Linux is using?</summary><p>Run resolvectl status. It lists the global servers and, separately, the servers on each network link, with the one in use shown as Current DNS Server. To see which link answered a particular lookup, run resolvectl query --cache=no example.com.</p></details>
+<details><summary>Why does my VPN leak DNS on Linux?</summary><p>systemd-resolved keeps DNS servers per link. If your Wi-Fi link still has DHCP-provided servers and is still a default route, lookups go to it as well as to the VPN. For a NetworkManager VPN, set ipv4.dns-priority and ipv6.dns-priority to a negative value such as -50 on the VPN profile and reconnect.</p></details>
+<details><summary>Is FallbackDNS a backup if my DNS server goes down?</summary><p>No. resolved.conf(5) says FallbackDNS is only used if no other DNS server information is known. If you want failover, list the extra servers in DNS= itself.</p></details>
+<details><summary>How do I know DNSSEC is actually validating?</summary><p>Run resolvectl query example.com and look for Data is authenticated: yes. Then query dnssec-failed.org, which is deliberately broken: with validation on, it fails with DNSSEC validation failed.</p></details>
+<details><summary>Does DNSOverTLS=opportunistic protect me?</summary><p>Only against passive snooping, and only when TLS works. In opportunistic mode systemd-resolved falls back to plain DNS if TLS fails and cannot authenticate the server. Use DNSOverTLS=yes with a #hostname on each server if you need it enforced.</p></details>
+
+<h2 id="sources">Sources</h2>
+<ul>
+<li><a href="https://man7.org/linux/man-pages/man8/systemd-resolved.service.8.html">systemd-resolved.service(8)</a>: protocols and routing, <code>/etc/resolv.conf</code> modes</li>
+<li><a href="https://man7.org/linux/man-pages/man5/resolved.conf.5.html">resolved.conf(5)</a>: <code>DNS=</code>, <code>FallbackDNS=</code>, <code>Domains=</code>, <code>DNSSEC=</code>, <code>DNSOverTLS=</code>, drop-ins</li>
+<li><a href="https://man7.org/linux/man-pages/man1/resolvectl.1.html">resolvectl(1)</a>: <code>query</code>, <code>--cache=</code>, <code>statistics</code></li>
+<li><a href="https://networkmanager.pages.freedesktop.org/NetworkManager/NetworkManager/nm-settings-nmcli.html">nm-settings-nmcli(5)</a>: <code>ipv4.ignore-auto-dns</code>, <code>ipv4.dns-priority</code>, <code>ipv4.dns</code></li>
+<li><a href="https://man7.org/linux/man-pages/man1/tcpdump.1.html">tcpdump(1)</a></li>
+</ul>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><strong>Panoptes</strong> by William MacKinnon
+      (<a href="https://github.com/doug445">doug445</a>) ·
+      <a href="https://github.com/doug445/Panoptes">Source on GitHub</a> ·
+      <a href="https://github.com/doug445/Panoptes/issues">Issues</a></p>
+    <p>Independent project. Not affiliated with Cloudflare, Mozilla, Google or any Linux distribution.</p>
+    <p>Copyright © 2026 William MacKinnon. Code under the MIT licence. Page last updated 14 October 2026.</p>
+  </div>
+</footer>
+
+<script>
+document.querySelectorAll('.codeblock').forEach(function (block) {
+  var btn = document.createElement('button');
+  btn.className = 'copy'; btn.type = 'button'; btn.textContent = 'Copy';
+  btn.addEventListener('click', function () {
+    navigator.clipboard.writeText(block.querySelector('code').innerText).then(function () {
+      btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
+    }).catch(function () { btn.textContent = 'Select + copy'; });
+  });
+  block.appendChild(btn);
+});
+</script>
+</body>
+</html>
