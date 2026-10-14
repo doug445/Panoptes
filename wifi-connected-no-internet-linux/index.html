@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WiFi Connected but No Internet on Linux: Fix It by Layer</title>
+<meta name="description" content="WiFi says connected and the LAN works, but nothing loads? Check each layer on Linux: link, route, DNS, leftover VPN routes and nftables, captive portal.">
+<link rel="canonical" href="https://doug445.github.io/Panoptes/wifi-connected-no-internet-linux/">
+<meta name="author" content="William MacKinnon">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="../style.css">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Panoptes">
+<meta property="og:title" content="WiFi Connected but No Internet on Linux: Fix It by Layer">
+<meta property="og:description" content="WiFi says connected and the LAN works, but nothing loads? Check each layer on Linux: link, route, DNS, leftover VPN routes and nftables, captive portal.">
+<meta property="og:url" content="https://doug445.github.io/Panoptes/wifi-connected-no-internet-linux/">
+<meta property="og:image" content="https://doug445.github.io/Panoptes/card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="article:published_time" content="2026-10-14">
+<meta property="article:modified_time" content="2026-10-14">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "TechArticle",
+      "headline": "WiFi connected but no internet on Linux",
+      "description": "WiFi says connected and the LAN works, but nothing loads? Check each layer on Linux: link, route, DNS, leftover VPN routes and nftables, captive portal.",
+      "datePublished": "2026-10-14",
+      "dateModified": "2026-10-14",
+      "image": "https://doug445.github.io/Panoptes/card.png",
+      "author": { "@type": "Person", "name": "William MacKinnon", "url": "https://github.com/doug445" },
+      "mainEntityOfPage": "https://doug445.github.io/Panoptes/wifi-connected-no-internet-linux/",
+      "about": { "@type": "SoftwareApplication", "name": "Panoptes", "url": "https://doug445.github.io/Panoptes/", "applicationCategory": "SecurityApplication", "operatingSystem": "Linux" }
+    },
+    {
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        { "@type": "ListItem", "position": 1, "name": "Panoptes", "item": "https://doug445.github.io/Panoptes/" },
+        { "@type": "ListItem", "position": 2, "name": "Wi-Fi: no internet", "item": "https://doug445.github.io/Panoptes/wifi-connected-no-internet-linux/" }
+      ]
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        { "@type": "Question", "name": "Why does my LAN work when the internet does not?", "acceptedAnswer": { "@type": "Answer", "text": "The kernel uses the most specific matching route. A leftover VPN route such as 0.0.0.0/5 beats your default route, so internet traffic goes into a dead tunnel, while your LAN subnet route is more specific still and keeps working. Run ip route get 1.1.1.1 to see which interface really carries internet traffic." } },
+        { "@type": "Question", "name": "Why does \"connected, no internet\" survive a reboot?", "acceptedAnswer": { "@type": "Answer", "text": "Because whatever breaks it is saved on disk: a NetworkManager profile that stored a tunnel and its routes, a VPN service that is still enabled, or a resolver setting such as strict DNS-over-TLS. Look for tunnel profiles under /etc/NetworkManager/system-connections/ and for enabled VPN services." } },
+        { "@type": "Question", "name": "I can ping 1.1.1.1 but websites do not load. What is wrong?", "acceptedAnswer": { "@type": "Answer", "text": "Your connection works and DNS is failing. Compare resolvectl query example.com with dig +short example.com @1.1.1.1. If only dig answers, check resolvectl status for strict DNS-over-TLS, then clear cached failures with resolvectl flush-caches." } },
+        { "@type": "Question", "name": "My browser says I am offline right after I turned the VPN off. Why?", "acceptedAnswer": { "@type": "Answer", "text": "Lookups that were in flight when the tunnel went down can fail DNSSEC validation, and systemd-resolved caches those failures. Routing is already fine. Run resolvectl flush-caches, or restart systemd-resolved." } },
+        { "@type": "Question", "name": "Why does the hotel Wi-Fi login page never appear?", "acceptedAnswer": { "@type": "Answer", "text": "Usually your own hardening hides it. A VPN tunnels past the portal, encrypted DNS cannot be redirected, ignoring the network's DNS discards the redirecting resolver, and a random MAC makes the login not stick. Disconnect the VPN, accept the network's DNS and pin your real MAC for that network, log in, then restore everything, with the VPN last." } }
+      ]
+    }
+  ]
+}
+</script>
+</head>
+<body>
+
+<nav class="sitenav" aria-label="Site">
+  <div class="wrap">
+    <a class="brand" href="../">Panoptes</a>
+    <a href="../wifi-connected-no-internet-linux/">Wi-Fi: no internet</a>
+    <a href="../dns-leak-test-linux/">DNS leak test</a>
+    <a href="../encrypted-client-hello-linux/">ECH on Linux</a>
+    <a href="https://github.com/doug445/Panoptes">GitHub</a>
+  </div>
+</nav>
+
+<main class="wrap">
+<p class="crumbs"><a href="../">Panoptes</a> › Wi-Fi: no internet</p>
+<h1>WiFi connected but no internet on Linux</h1>
+<p class="lede">NetworkManager says you are connected. You can reach the router, maybe even a printer or NAS on the LAN, but no website loads, and rebooting does not help. This page walks the problem one layer at a time with read-only checks, so you find the broken layer before you change anything, then gives the fix for each.</p>
+
+<p>Run the checks in order. Each one assumes the one before it passed. Replace <code>wlan0</code> with your Wi-Fi interface name, which <code>nmcli device status</code> lists in the <code>DEVICE</code> column.</p>
+
+<h2 id="triage">Quick triage: which layer is broken?</h2>
+<div class="table-scroll"><table>
+<thead><tr><th>Layer</th><th>Read-only check</th><th>If it fails</th></tr></thead>
+<tbody>
+<tr><td>Link</td><td><code>nmcli device status</code></td><td>Not associated, or the radio is blocked</td></tr>
+<tr><td>Address and gateway</td><td><code>ip -4 route show default</code></td><td>No default route: DHCP or the connection profile</td></tr>
+<tr><td>Upstream by IP</td><td><code>ping -c 3 1.1.1.1</code></td><td>Routing or firewall, often a leftover VPN</td></tr>
+<tr><td>TCP by IP</td><td><code>timeout 5 bash -c 'exec 3&lt;&gt;/dev/tcp/1.1.1.1/443' &amp;&amp; echo open</code></td><td>If this works but ping fails, ICMP is just filtered</td></tr>
+<tr><td>DNS</td><td><code>resolvectl query example.com</code></td><td>The resolver, not the network</td></tr>
+</tbody>
+</table></div>
+<p>If the TCP check prints <code>open</code> but names do not resolve, skip straight to <a href="#dns">DNS</a>. If even the TCP check fails while the gateway answers, go to <a href="#route">the route</a> and <a href="#vpn-leftovers">leftover VPN state</a>.</p>
+
+<h2 id="link">Layer 1: is the Wi-Fi link really up?</h2>
+<div class="codeblock"><pre><code>nmcli device status
+rfkill list
+nmcli -f GENERAL.STATE,IP4.ADDRESS,IP4.GATEWAY device show wlan0</code></pre></div>
+<ul>
+<li>The Wi-Fi device should be <code>connected</code>. If <code>rfkill list</code> shows <code>Soft blocked: yes</code>, run <code>sudo rfkill unblock wifi</code>.</li>
+<li>No <code>IP4.ADDRESS</code>, or one starting <code>169.254.</code>, means DHCP never completed. That is an association or DHCP problem, not an internet one.</li>
+<li>No <code>IP4.GATEWAY</code> means no default route, so nothing beyond the LAN can work.</li>
+</ul>
+<p>Next, check the gateway itself. Some access points (hotel and guest networks with client isolation, in particular) drop ping to the gateway while working normally, so do not judge layer 2 by ping alone. Check the neighbour table too:</p>
+<div class="codeblock"><pre><code>ip -4 route show default
+ping -c 3 -W 2 192.168.1.1
+ip neigh show dev wlan0</code></pre></div>
+<p>The address after <code>via</code> in the first command is your gateway; use it in place of <code>192.168.1.1</code>. An entry for it in <code>ip neigh</code> with a MAC address (<code>lladdr</code>) and a state such as <code>REACHABLE</code> or <code>STALE</code> means layer 2 works. <code>FAILED</code> or <code>INCOMPLETE</code> means the router is not answering at all.</p>
+
+<h2 id="route">Layer 2: where are packets actually going?</h2>
+<p>This is the check people skip, and it catches the most confusing failure: the default route is fine, but something more specific is stealing your traffic.</p>
+<div class="codeblock"><pre><code>ip route get 1.1.1.1
+ip -4 route show | grep linkdown
+ip rule show</code></pre></div>
+<ul>
+<li><code>ip route get</code> prints the route the kernel will really use. It should name your gateway and <code>dev wlan0</code>. If it names <code>tun0</code>, <code>wg0</code>, <code>CloudflareWARP</code> or another tunnel while you believe the VPN is off, you have found the problem.</li>
+<li>Routes marked <code>linkdown</code> point into an interface that is down. They still take part in route selection, and traffic matched by them goes nowhere.</li>
+<li><code>ip rule show</code> normally has three rules: priority 0 (<code>local</code>), 32766 (<code>main</code>) and 32767 (<code>default</code>). Extra rules sending traffic to a numbered table usually belong to a VPN client.</li>
+</ul>
+<div class="note"><p><strong>Why the LAN still works.</strong> The kernel picks the most specific matching route. A VPN in split-tunnel mode can install hundreds of routes such as <code>0.0.0.0/5</code>, <code>8.0.0.0/7</code> and <code>32.0.0.0/3</code>, each more specific than <code>default via 192.168.1.1</code>. If those routes outlive the VPN, every internet packet goes into a dead tunnel. Your LAN subnet route, <code>192.168.1.0/24</code> for example, is more specific still, so local traffic keeps working. That is why this looks like a DNS or ISP fault when it is neither.</p></div>
+
+<h2 id="vpn-leftovers">Leftover VPN or killswitch state that survives a reboot</h2>
+<p>A real case: Wi-Fi associated, LAN worked, the internet was gone, and it stayed gone across reboots. Stopping, disabling and masking the Cloudflare WARP daemon changed nothing. The cause was NetworkManager. It had adopted WARP's <code>CloudflareWARP</code> tunnel device as an external connection, and a later <code>nmcli con mod</code> on that connection (setting its firewall zone) saved it to <code>/etc/NetworkManager/system-connections/</code>, with autoconnect on and WARP's ~314 split-tunnel routes stored as static routes. From then on, NetworkManager recreated the tunnel and its routes on every network change, with the WARP daemon dead.</p>
+<p>So check three places: the firewall, the routing tables, and NetworkManager's saved profiles.</p>
+<h3>nftables tables left by a VPN client</h3>
+<div class="codeblock"><pre><code>sudo nft list tables
+sudo nft list table inet cloudflare-warp</code></pre></div>
+<p>Your firewall's own tables belong there. A table belonging to a VPN you have disconnected does not. Cloudflare WARP's table is <code>inet cloudflare-warp</code>.</p>
+<h3>Tunnel interfaces and the routes on them</h3>
+<div class="codeblock"><pre><code>ip -br link
+ip route show table all | grep -E 'dev (tun|wg|CloudflareWARP)'</code></pre></div>
+<h3>NetworkManager profiles that persist a tunnel</h3>
+<div class="codeblock"><pre><code>nmcli -f NAME,TYPE,DEVICE,FILENAME connection show
+sudo grep -cE '^route[0-9]+=' /etc/NetworkManager/system-connections/NAME.nmconnection</code></pre></div>
+<p>Look for a <code>tun</code>, <code>wireguard</code> or <code>vpn</code> profile whose <code>FILENAME</code> is under <code>/etc/NetworkManager/system-connections/</code> and that you did not create. In the second command, use that <code>FILENAME</code> path. A VPN profile does not normally need a list of static routes, because the VPN daemon installs its routes when it connects. A tunnel profile holding dozens or hundreds of <code>routeN=</code> lines is a saved snapshot of a live tunnel.</p>
+
+<h3>Fix: remove the leftovers</h3>
+<p>For Cloudflare WARP (for another VPN, use its service, nftables table and interface names instead):</p>
+<div class="codeblock"><pre><code>warp-cli disconnect
+sudo systemctl disable --now warp-svc
+sudo nft delete table inet cloudflare-warp
+sudo ip -4 route flush dev CloudflareWARP
+sudo ip -6 route flush dev CloudflareWARP
+sudo ip link delete CloudflareWARP</code></pre></div>
+<p>If <code>systemctl list-units 'warp-svc*'</code> shows a socket unit, stop that too, or it can start the daemon again. Flush routes by device as shown, and do not paste lines from <code>ip route show</code> into <code>ip route del</code>: those lines end in status flags such as <code>linkdown</code>, which <code>ip route del</code> does not accept, so the deletes fail.</p>
+<p>If NetworkManager has saved the tunnel as a profile, delete the profile, then tell NetworkManager to leave the device alone in future:</p>
+<div class="codeblock"><pre><code>sudo nmcli connection delete "NAME"
+printf '[keyfile]\nunmanaged-devices=interface-name:CloudflareWARP\n' | sudo tee /etc/NetworkManager/conf.d/99-warp-unmanaged.conf
+sudo nmcli general reload conf</code></pre></div>
+<p>A reboot also picks up the new file. An unmanaged device never gets a profile, so NetworkManager cannot save one. Run <code>ip route get 1.1.1.1</code> again: it should now name your gateway.</p>
+
+<h2 id="dns">Layer 3: the network works, DNS does not</h2>
+<p>If the TCP check printed <code>open</code>, the internet is up and the resolver is the problem. Compare <code>systemd-resolved</code> with a direct query that bypasses it:</p>
+<div class="codeblock"><pre><code>resolvectl query example.com
+dig +short example.com @1.1.1.1
+resolvectl status</code></pre></div>
+<p>If <code>dig</code> answers and <code>resolvectl</code> does not, the fault is in the resolver configuration. The usual causes:</p>
+<ul>
+<li><strong>Strict DNS-over-TLS.</strong> With <code>DNSOverTLS=yes</code>, lookups fail if the server cannot be reached over TLS. There is no plain-DNS fallback. <code>opportunistic</code> falls back. <code>resolvectl status</code> shows the mode on its <code>Protocols:</code> line.</li>
+<li><strong>Failures cached after a VPN toggle.</strong> Bringing a tunnel up or down kills DNS lookups that were in flight through it. With DNSSEC on, those can fail validation (<code>failed-auxiliary</code>), and <code>systemd-resolved</code> caches the failure. Routing works again immediately, but the browser still says you are offline. Clear the cache:</li>
+</ul>
+<div class="codeblock"><pre><code>resolvectl flush-caches
+resolvectl reset-server-features</code></pre></div>
+<p>Restarting <code>systemd-resolved</code> has the same effect. One related trap: <code>FallbackDNS=</code> in <code>resolved.conf</code> is not a failover. It is only used when no other DNS server is known at all. If you want a second resolver to take over when the first goes quiet, list it in <code>DNS=</code>.</p>
+
+<h2 id="captive-portal">Captive portals: the login page never appears</h2>
+<p>On hotel, airport and café Wi-Fi, "connected, no internet" usually means a captive portal you cannot see. Check what NetworkManager thinks, and probe for a redirect:</p>
+<div class="codeblock"><pre><code>nmcli networking connectivity check
+curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' http://connectivitycheck.gstatic.com/generate_204</code></pre></div>
+<p><code>portal</code> from the first command means NetworkManager has detected one. From the second, <code>204</code> means you are online. Any other result, typically a redirect with a URL or a <code>200</code> login page, means something intercepted the request: the portal.</p>
+<p>A hardened setup hides the portal. Each of these blocks it:</p>
+<div class="table-scroll"><table>
+<thead><tr><th>Setting</th><th>Why the portal fails</th></tr></thead>
+<tbody>
+<tr><td>A VPN or WARP tunnel</td><td>Your traffic goes past the portal, so it never sees a request to redirect.</td></tr>
+<tr><td>DNS-over-TLS</td><td>The portal redirects you by hijacking plain DNS and cannot touch encrypted queries.</td></tr>
+<tr><td><code>ipv4.ignore-auto-dns</code></td><td>The network's own resolver, which does the redirecting, is discarded.</td></tr>
+<tr><td>Random MAC address</td><td>Each reconnect looks like a new client, so your login does not stick.</td></tr>
+<tr><td>Connectivity checking off</td><td>NetworkManager never probes, so the "sign in to network" prompt never fires.</td></tr>
+</tbody>
+</table></div>
+<p>To get through, take those down for this one network, log in, then put them back:</p>
+<div class="codeblock"><pre><code>warp-cli disconnect
+sudo nmcli connection modify "SSID" ipv4.ignore-auto-dns no
+sudo nmcli connection modify "SSID" 802-11-wireless.cloned-mac-address permanent
+sudo nmcli connection up "SSID"</code></pre></div>
+<p>If <code>/etc/systemd/resolved.conf</code> sets <code>DNSOverTLS=yes</code>, set it to <code>no</code> for now and run <code>sudo systemctl restart systemd-resolved</code>. If the file will not save, check <code>lsattr /etc/systemd/resolved.conf</code>: some hardening setups lock it with <code>chattr +i</code>. Then open <code>http://</code> followed by your gateway address in a browser and log in.</p>
+<p>Reconnect the VPN only after the portal has let you on, and check that it has. If the tunnel comes up first, the portal cannot see your traffic and you are back where you started.</p>
+
+<div class="tool"><p><strong>Automated:</strong> <code>netmaster</code> from <a href="https://github.com/doug445/Panoptes">Panoptes</a> was written after the outage described above. <code>sudo netmaster diagnose</code> runs the checks on this page as one read-only report: a gateway, ping, TCP 443 and DNS ladder; routes into downed interfaces; NetworkManager tunnel profiles carrying static routes; stale WARP tables and interfaces; firewalld drop-zone pinning; and a "portal-blind" warning when your own hardening is hiding a login page. <code>netmaster fix --dry-run</code> previews its repair ladder, which backs up what it touches, checks connectivity after every rung and stops as soon as the internet is back. <code>netmaster portal</code> and <code>netmaster restore</code> handle the captive-portal sequence. For WARP alone, <code>sudo warp-killswitch down</code> removes its nftables table, routing table and interface, switches to plain DNS and disables the daemon so it stays down across reboots; <code>warp-killswitch up</code> puts it back. Note that netmaster was built on Fedora Asahi, and its last-resort driver reload targets the <code>brcmfmac</code> Wi-Fi driver.</p></div>
+
+<h2 id="faq">FAQ</h2>
+<details><summary>Why does my LAN work when the internet does not?</summary><p>The kernel uses the most specific matching route. A leftover VPN route such as 0.0.0.0/5 beats your default route, so internet traffic goes into a dead tunnel, while your LAN subnet route is more specific still and keeps working. Run ip route get 1.1.1.1 to see which interface really carries internet traffic.</p></details>
+<details><summary>Why does "connected, no internet" survive a reboot?</summary><p>Because whatever breaks it is saved on disk: a NetworkManager profile that stored a tunnel and its routes, a VPN service that is still enabled, or a resolver setting such as strict DNS-over-TLS. Look for tunnel profiles under /etc/NetworkManager/system-connections/ and for enabled VPN services.</p></details>
+<details><summary>I can ping 1.1.1.1 but websites do not load. What is wrong?</summary><p>Your connection works and DNS is failing. Compare resolvectl query example.com with dig +short example.com @1.1.1.1. If only dig answers, check resolvectl status for strict DNS-over-TLS, then clear cached failures with resolvectl flush-caches.</p></details>
+<details><summary>My browser says I am offline right after I turned the VPN off. Why?</summary><p>Lookups that were in flight when the tunnel went down can fail DNSSEC validation, and systemd-resolved caches those failures. Routing is already fine. Run resolvectl flush-caches, or restart systemd-resolved.</p></details>
+<details><summary>Why does the hotel Wi-Fi login page never appear?</summary><p>Usually your own hardening hides it. A VPN tunnels past the portal, encrypted DNS cannot be redirected, ignoring the network's DNS discards the redirecting resolver, and a random MAC makes the login not stick. Disconnect the VPN, accept the network's DNS and pin your real MAC for that network, log in, then restore everything, with the VPN last.</p></details>
+
+<h2 id="sources">Sources</h2>
+<ul>
+<li><a href="https://man7.org/linux/man-pages/man1/resolvectl.1.html">resolvectl(1)</a></li>
+<li><a href="https://man7.org/linux/man-pages/man5/resolved.conf.5.html">resolved.conf(5)</a>: <code>DNSOverTLS=</code>, <code>FallbackDNS=</code></li>
+<li><a href="https://man7.org/linux/man-pages/man8/ip-route.8.html">ip-route(8)</a> and <a href="https://man7.org/linux/man-pages/man8/ip-rule.8.html">ip-rule(8)</a></li>
+<li><a href="https://networkmanager.pages.freedesktop.org/NetworkManager/NetworkManager/nmcli.html">nmcli(1)</a>: connectivity states</li>
+<li><a href="https://networkmanager.pages.freedesktop.org/NetworkManager/NetworkManager/NetworkManager.conf.html">NetworkManager.conf(5)</a>: <code>unmanaged-devices</code>, connectivity checking</li>
+<li><a href="https://networkmanager.pages.freedesktop.org/NetworkManager/NetworkManager/nm-settings-nmcli.html">nm-settings-nmcli(5)</a>: <code>ipv4.ignore-auto-dns</code>, <code>connection.zone</code></li>
+<li>nft(8), nftables 1.1.6 manual: <code>list tables</code>, <code>delete table</code></li>
+</ul>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><strong>Panoptes</strong> by William MacKinnon
+      (<a href="https://github.com/doug445">doug445</a>) ·
+      <a href="https://github.com/doug445/Panoptes">Source on GitHub</a> ·
+      <a href="https://github.com/doug445/Panoptes/issues">Issues</a></p>
+    <p>Independent project. Not affiliated with Cloudflare, Mozilla, Google or any Linux distribution.</p>
+    <p>Copyright © 2026 William MacKinnon. Code under the MIT licence. Page last updated 14 October 2026.</p>
+  </div>
+</footer>
+
+<script>
+document.querySelectorAll('.codeblock').forEach(function (block) {
+  var btn = document.createElement('button');
+  btn.className = 'copy'; btn.type = 'button'; btn.textContent = 'Copy';
+  btn.addEventListener('click', function () {
+    navigator.clipboard.writeText(block.querySelector('code').innerText).then(function () {
+      btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
+    }).catch(function () { btn.textContent = 'Select + copy'; });
+  });
+  block.appendChild(btn);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Enable Encrypted Client Hello (ECH) on Linux</title>
+<meta name="description" content="Enable Encrypted Client Hello on Linux: build an ECH-capable curl, turn on ECH and secure DNS in Firefox, Chrome and Brave, then test at defo.ie or tls-ech.dev.">
+<link rel="canonical" href="https://doug445.github.io/Panoptes/encrypted-client-hello-linux/">
+<meta name="author" content="William MacKinnon">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="../style.css">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Panoptes">
+<meta property="og:title" content="Enable Encrypted Client Hello (ECH) on Linux">
+<meta property="og:description" content="Enable Encrypted Client Hello on Linux: build an ECH-capable curl, turn on ECH and secure DNS in Firefox, Chrome and Brave, then test at defo.ie or tls-ech.dev.">
+<meta property="og:url" content="https://doug445.github.io/Panoptes/encrypted-client-hello-linux/">
+<meta property="og:image" content="https://doug445.github.io/Panoptes/card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="article:published_time" content="2026-10-14">
+<meta property="article:modified_time" content="2026-10-14">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "TechArticle",
+      "headline": "Enable Encrypted Client Hello (ECH) on Linux",
+      "description": "Enable Encrypted Client Hello on Linux: build an ECH-capable curl, turn on ECH and secure DNS in Firefox, Chrome and Brave, then test at defo.ie or tls-ech.dev.",
+      "datePublished": "2026-10-14",
+      "dateModified": "2026-10-14",
+      "image": "https://doug445.github.io/Panoptes/card.png",
+      "author": { "@type": "Person", "name": "William MacKinnon", "url": "https://github.com/doug445" },
+      "mainEntityOfPage": "https://doug445.github.io/Panoptes/encrypted-client-hello-linux/",
+      "about": { "@type": "SoftwareApplication", "name": "Panoptes", "url": "https://doug445.github.io/Panoptes/", "applicationCategory": "SecurityApplication", "operatingSystem": "Linux" }
+    },
+    {
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        { "@type": "ListItem", "position": 1, "name": "Panoptes", "item": "https://doug445.github.io/Panoptes/" },
+        { "@type": "ListItem", "position": 2, "name": "ECH on Linux", "item": "https://doug445.github.io/Panoptes/encrypted-client-hello-linux/" }
+      ]
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        { "@type": "Question", "name": "Is ECH on by default in Firefox and Chrome?", "acceptedAnswer": { "@type": "Answer", "text": "Chrome has shipped ECH enabled since Chrome 117. Current Firefox sets network.dns.echconfig.enabled and network.dns.http3_echconfig.enabled to true by default. In both, ECH only happens when the browser gets the site's HTTPS DNS record, so turn on secure DNS and confirm at defo.ie/ech-check.php." } },
+        { "@type": "Question", "name": "Why does curl say the installed libcurl version does not support --ech?", "acceptedAnswer": { "@type": "Answer", "text": "Your curl was built without ECH. Run curl -V and look for ECH on the Features line. Distribution builds usually lack it, because ECH is experimental in curl and has to be enabled at build time against a TLS library that implements it, so build your own." } },
+        { "@type": "Question", "name": "Why does curl --ech hard fail with error 101?", "acceptedAnswer": { "@type": "Answer", "text": "Exit code 101 is CURLE_ECH_REQUIRED: ECH could not be done. Check that you passed --doh-url, because curl only fetches the HTTPS record over DoH, and that the site's HTTPS record has an ech= value. If one test site fails and another works, the problem is on that server." } },
+        { "@type": "Question", "name": "Does ECH hide which site I visit from my ISP?", "acceptedAnswer": { "@type": "Answer", "text": "It hides the hostname in the TLS handshake, not the destination IP address. On a large CDN that address is shared by many sites and says little; a site on its own IP is still identifiable. Packet sizes and timing also remain visible." } },
+        { "@type": "Question", "name": "Should I enable DoH and ECH in Tor Browser or Mullvad Browser?", "acceptedAnswer": { "@type": "Answer", "text": "No. Both resolve names through their proxy circuit on purpose. Pointing them at a DoH resolver would send your lookups around the circuit, which weakens the anonymity they are built for." } }
+      ]
+    }
+  ]
+}
+</script>
+</head>
+<body>
+
+<nav class="sitenav" aria-label="Site">
+  <div class="wrap">
+    <a class="brand" href="../">Panoptes</a>
+    <a href="../wifi-connected-no-internet-linux/">Wi-Fi: no internet</a>
+    <a href="../dns-leak-test-linux/">DNS leak test</a>
+    <a href="../encrypted-client-hello-linux/">ECH on Linux</a>
+    <a href="https://github.com/doug445/Panoptes">GitHub</a>
+  </div>
+</nav>
+
+<main class="wrap">
+<p class="crumbs"><a href="../">Panoptes</a> › ECH on Linux</p>
+<h1>Enable Encrypted Client Hello (ECH) on Linux</h1>
+<p class="lede">You encrypted your DNS, yet every HTTPS connection still announces the site's name in the clear. Your distribution's curl rejects <code>--ech</code>, and you are not sure whether your browser is using ECH at all. This page covers what ECH hides, why it does nothing without secure DNS, how to build a curl that speaks it, how to set it up in Firefox and Chromium-based browsers, and how to prove it works.</p>
+
+<h2 id="what-ech-hides">What ECH hides, and what it does not</h2>
+<p>HTTPS encrypts what you send and receive, but not which site you are talking to. The first message of a TLS handshake, the ClientHello, carries the hostname in the SNI field before any encryption exists. Your ISP, the café router or a corporate middlebox can read it, and much real-world filtering and logging works exactly that way.</p>
+<p>With ECH, the site publishes a public key in a DNS <code>HTTPS</code> record. The client encrypts the real ClientHello, hostname included, to that key and wraps it in an outer ClientHello that names only a cover name, such as the provider's. An observer sees a connection to the cover name, not the site behind it.</p>
+<p>What it does not do:</p>
+<ul>
+<li><strong>The destination IP is still visible.</strong> Behind a big CDN, thousands of sites share an address, so that says little. A site on its own IP is identified by the address alone. A VPN hides the IP from your ISP but shows both ends to the VPN operator.</li>
+<li><strong>The site has to support it.</strong> Only sites that publish an ECH key in DNS get the protection. Many Cloudflare-fronted sites do; much of the web does not yet.</li>
+<li><strong>Traffic analysis still works.</strong> Packet sizes and timing still reveal things.</li>
+<li><strong>Some networks block it,</strong> deliberately or through middleboxes that fail on an unfamiliar handshake.</li>
+</ul>
+
+<h2 id="dns-half">The DNS half is not optional</h2>
+<p>The ECH key arrives in a DNS lookup. If that lookup travels in plaintext, the hostname leaks in the query instead, and anyone on the path can strip the key from the answer so the client falls back to a normal, readable handshake. ECH is only worth having with DNS-over-HTTPS or DNS-over-TLS protecting the lookup.</p>
+<p>Check whether a site publishes an ECH key with an <code>ech=</code> value in its <code>HTTPS</code> record:</p>
+<div class="codeblock"><pre><code>dig +short HTTPS defo.ie
+resolvectl query -t HTTPS defo.ie</code></pre></div>
+<p>If your <code>dig</code> does not know the <code>HTTPS</code> type, ask for it by number: <code>dig +short defo.ie TYPE65</code>.</p>
+
+<h2 id="curl">Does your curl support ECH?</h2>
+<div class="codeblock"><pre><code>curl -V | grep -w ECH</code></pre></div>
+<p>An ECH-capable build lists <code>ECH</code> on its <code>Features:</code> line. Without it, <code>curl --ech true</code> stops with <code>option --ech: the installed libcurl version does not support this</code>. Distribution builds usually lack it: the curl project marks ECH as experimental, and it has to be switched on when curl is built (<code>--enable-ech</code>) against a TLS library that implements it. According to curl's build notes, those are OpenSSL 4.0.0 or later, BoringSSL, AWS-LC, wolfSSL and Rustls.</p>
+
+<h2 id="build-curl">Build an ECH-capable curl</h2>
+<p>These steps follow curl's own <code>docs/ECH.md</code>. Everything stays under <code>$HOME/code</code>, so your system curl and OpenSSL are untouched. You need git, a C compiler, make, perl, autoconf, automake, libtool and pkg-config. If curl's <code>configure</code> stops on a missing library, install that library's development package.</p>
+<div class="codeblock"><pre><code>mkdir -p $HOME/code &amp;&amp; cd $HOME/code
+git clone --depth 1 --branch openssl-4.0.0 https://github.com/openssl/openssl
+cd openssl
+./config --libdir=lib --prefix=$HOME/code/openssl-local-inst
+make -j"$(nproc)"
+make install_sw</code></pre></div>
+<div class="codeblock"><pre><code>cd $HOME/code
+git clone --depth 1 https://github.com/curl/curl
+cd curl
+autoreconf -fi
+LDFLAGS="-Wl,-rpath,$HOME/code/openssl-local-inst/lib/" ./configure --with-ssl=$HOME/code/openssl-local-inst --enable-ech
+make -j"$(nproc)"</code></pre></div>
+<p><code>configure</code> should end with <code>WARNING: ECH is enabled but marked EXPERIMENTAL</code>. If it does not, ECH is not enabled. The rpath in <code>LDFLAGS</code> lets the new binary find its OpenSSL without touching the system library path. Do not add that directory to <code>/etc/ld.so.conf.d</code>, which would hand an experimental TLS library to every program on the machine.</p>
+
+<h2 id="test-curl">Test ECH with curl</h2>
+<div class="codeblock"><pre><code>cd $HOME/code/curl
+./src/curl -V | grep -w ECH
+./src/curl -sS --ech hard --doh-url https://one.one.one.one/dns-query https://defo.ie/ech-check.php | grep -oiE 'SSL_ECH_STATUS: [a-z_]+'
+./src/curl -sS --ech hard --doh-url https://one.one.one.one/dns-query https://tls-ech.dev/ | grep -o 'You are[^&lt;]*'</code></pre></div>
+<ul>
+<li><code>--ech hard</code> refuses to fall back to a cleartext SNI, so a successful transfer means ECH was used. <code>--ech true</code> tries ECH if possible and carries on without it otherwise.</li>
+<li><code>--doh-url</code> matters. curl only gets the <code>HTTPS</code> record, and so the ECH key, through DNS-over-HTTPS. Without it, you would have to paste the key in with <code>--ech ecl:</code>.</li>
+<li>A working run prints <code>SSL_ECH_STATUS: SUCCESS</code> from defo.ie and <code>You are using ECH.</code> from tls-ech.dev. Plain curl gets <code>NOT_TRIED</code> and <code>You are not using ECH.</code></li>
+<li>Most ECH failures exit with code 101 (<code>CURLE_ECH_REQUIRED</code>). If one test site fails and another passes, the problem is that server or the draft version it speaks, not your build. Test against more than one.</li>
+</ul>
+
+<h2 id="firefox">Firefox, LibreWolf and other Firefox-based browsers</h2>
+<p>In current Firefox source, the ECH preferences <code>network.dns.echconfig.enabled</code> and <code>network.dns.http3_echconfig.enabled</code> default to <code>true</code>. Check them in <code>about:config</code>, and set them back to <code>true</code> if something changed them. The part that usually needs doing is secure DNS, which Firefox calls TRR:</p>
+<div class="table-scroll"><table>
+<thead><tr><th>Preference</th><th>Value</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>network.trr.mode</code></td><td><code>2</code></td><td>DoH first, the system resolver as fallback</td></tr>
+<tr><td><code>network.trr.mode</code></td><td><code>3</code></td><td>DoH only, never the system resolver</td></tr>
+<tr><td><code>network.trr.uri</code></td><td><code>https://cloudflare-dns.com/dns-query</code></td><td>The DoH server to use (any https:// DoH endpoint)</td></tr>
+</tbody>
+</table></div>
+<p>The DNS over HTTPS section of Firefox's Privacy &amp; Security settings sets the same thing. To make the settings survive a preferences reset, put them in <code>user.js</code> in your profile folder (<code>about:profiles</code> shows its path). Firefox reads that file at every start:</p>
+<div class="codeblock"><pre><code>user_pref("network.dns.echconfig.enabled", true);
+user_pref("network.dns.http3_echconfig.enabled", true);
+user_pref("network.trr.mode", 2);
+user_pref("network.trr.uri", "https://cloudflare-dns.com/dns-query");</code></pre></div>
+<p>Mode 2 falls back to the system resolver if DoH fails, so a hostile network can still push you to plaintext lookups. Mode 3 does not fall back, but it breaks captive portals and names that only your local DNS knows.</p>
+
+<h2 id="chromium">Chrome, Brave, Chromium and Vivaldi</h2>
+<p>Chrome has shipped ECH enabled by default since Chrome 117, so there is nothing to switch on for ECH itself. It still needs the site's <code>HTTPS</code> record, so turn on <strong>Use secure DNS</strong> under Settings → Privacy and security → Security and pick a provider. That keeps the lookup encrypted and the key intact. Organisations can turn ECH off with the <code>EncryptedClientHelloEnabled</code> policy; if ECH never works, check <code>chrome://policy</code>. Brave, Vivaldi, Edge and other Chromium-based browsers build on the same network stack, but confirm with a test page rather than assuming.</p>
+<p>Leave Tor Browser and Mullvad Browser alone. They resolve names through their proxy circuit on purpose, and pointing them at a DoH resolver would send your lookups around it.</p>
+
+<h2 id="test-browser">Test ECH in the browser</h2>
+<ul>
+<li><a href="https://defo.ie/ech-check.php">defo.ie/ech-check.php</a> reports <code>SSL_ECH_STATUS</code> and the inner and outer SNI.</li>
+<li><a href="https://tls-ech.dev/">tls-ech.dev</a> says "You are using ECH" or "You are not using ECH".</li>
+<li><a href="https://crypto.cloudflare.com/cdn-cgi/trace">crypto.cloudflare.com/cdn-cgi/trace</a> prints an <code>sni=</code> line. <code>sni=plaintext</code> means the hostname went out in the clear.</li>
+</ul>
+<p>Restart the browser after changing settings. A Chromium-based browser that is still running when you edit its files can overwrite your change when it exits.</p>
+
+<div class="tool"><p><strong>Automated:</strong> two scripts from <a href="https://github.com/doug445/Panoptes">Panoptes</a> do this for you. <code>ech-build.sh</code> builds Stephen Farrell's OpenSSL ECH branch (<code>ECH-draft-13c</code> by default) as a static library in <code>/opt/openssl-ech</code>, so no other program can link it, then curl against it into <code>/usr/local</code>. Package updates leave both alone, and <code>/usr/bin/curl</code> stays installed. Note that <code>/usr/local/bin/curl</code> then comes first in <code>PATH</code>, including under sudo, and the build is deliberately minimal: no HTTP/3, and without <code>--full</code> no brotli, zstd, GSSAPI, SCP, SFTP, SMB or LDAP. <code>--verify</code> runs a live <code>--ech hard</code> handshake, and <code>--uninstall</code> hands curl back to your distribution. <code>ech-browsers.sh</code> finds every Firefox-family and Chromium-family browser, including Flatpak and Snap installs, and writes the preferences above to <code>user.js</code>, or sets Chromium's secure DNS in <code>Local State</code>. It backs up each file, supports <code>--list</code>, <code>--dry-run</code> and <code>--revert</code>, skips Chromium browsers that are still running, and never touches Tor Browser or Mullvad Browser. Its Firefox default is TRR mode 2 with Cloudflare's DoH endpoint. <code>checkdns</code> checks both halves: the <code>ech=</code> key in DNS and a real handshake with defo.ie.</p></div>
+
+<h2 id="faq">FAQ</h2>
+<details><summary>Is ECH on by default in Firefox and Chrome?</summary><p>Chrome has shipped ECH enabled since Chrome 117. Current Firefox sets network.dns.echconfig.enabled and network.dns.http3_echconfig.enabled to true by default. In both, ECH only happens when the browser gets the site's HTTPS DNS record, so turn on secure DNS and confirm at defo.ie/ech-check.php.</p></details>
+<details><summary>Why does curl say the installed libcurl version does not support --ech?</summary><p>Your curl was built without ECH. Run curl -V and look for ECH on the Features line. Distribution builds usually lack it, because ECH is experimental in curl and has to be enabled at build time against a TLS library that implements it, so build your own.</p></details>
+<details><summary>Why does curl --ech hard fail with error 101?</summary><p>Exit code 101 is CURLE_ECH_REQUIRED: ECH could not be done. Check that you passed --doh-url, because curl only fetches the HTTPS record over DoH, and that the site's HTTPS record has an ech= value. If one test site fails and another works, the problem is on that server.</p></details>
+<details><summary>Does ECH hide which site I visit from my ISP?</summary><p>It hides the hostname in the TLS handshake, not the destination IP address. On a large CDN that address is shared by many sites and says little; a site on its own IP is still identifiable. Packet sizes and timing also remain visible.</p></details>
+<details><summary>Should I enable DoH and ECH in Tor Browser or Mullvad Browser?</summary><p>No. Both resolve names through their proxy circuit on purpose. Pointing them at a DoH resolver would send your lookups around the circuit, which weakens the anonymity they are built for.</p></details>
+
+<h2 id="sources">Sources</h2>
+<ul>
+<li><a href="https://curl.se/docs/manpage.html">curl(1) man page</a>: <code>--ech</code>, <code>--doh-url</code>, the ECH feature flag</li>
+<li><a href="https://github.com/curl/curl/blob/master/docs/ECH.md">curl docs/ECH.md</a>: supported TLS libraries, build steps, test sites</li>
+<li><a href="https://curl.se/libcurl/c/CURLOPT_ECH.html">CURLOPT_ECH</a>: experimental status</li>
+<li><a href="https://github.com/mozilla-firefox/firefox/blob/main/modules/libpref/init/StaticPrefList.yaml">Firefox StaticPrefList.yaml</a>: ECH preference defaults</li>
+<li><a href="https://wiki.mozilla.org/Trusted_Recursive_Resolver">Mozilla wiki: Trusted Recursive Resolver</a>: <code>network.trr.mode</code> values</li>
+<li><a href="https://chromestatus.com/feature/6196703843581952">Chrome Platform Status: TLS Encrypted Client Hello</a>: shipped in Chrome 117, enterprise policy</li>
+<li><a href="https://man7.org/linux/man-pages/man1/resolvectl.1.html">resolvectl(1)</a>: <code>query --type=</code></li>
+</ul>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><strong>Panoptes</strong> by William MacKinnon
+      (<a href="https://github.com/doug445">doug445</a>) ·
+      <a href="https://github.com/doug445/Panoptes">Source on GitHub</a> ·
+      <a href="https://github.com/doug445/Panoptes/issues">Issues</a></p>
+    <p>Independent project. Not affiliated with Cloudflare, Mozilla, Google or any Linux distribution.</p>
+    <p>Copyright © 2026 William MacKinnon. Code under the MIT licence. Page last updated 14 October 2026.</p>
+  </div>
+</footer>
+
+<script>
+document.querySelectorAll('.codeblock').forEach(function (block) {
+  var btn = document.createElement('button');
+  btn.className = 'copy'; btn.type = 'button'; btn.textContent = 'Copy';
+  btn.addEventListener('click', function () {
+    navigator.clipboard.writeText(block.querySelector('code').innerText).then(function () {
+      btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
+    }).catch(function () { btn.textContent = 'Select + copy'; });
+  });
+  block.appendChild(btn);
+});
+</script>
+</body>
+</html>

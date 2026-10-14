@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panoptes: Linux DNS leak audit, ECH and network watch</title>
+<meta name="description" content="Free Linux network security suite: DNS leak auditing, DNSSEC and DNS-over-TLS hardening, Encrypted Client Hello in curl and every browser, Cloudflare WARP control, ARP-spoof alerts.">
+<link rel="canonical" href="https://doug445.github.io/Panoptes/">
+<meta name="author" content="William MacKinnon">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="style.css">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Panoptes">
+<meta property="og:title" content="Panoptes: Linux DNS leak auditing, ECH and network intrusion investigation">
+<meta property="og:description" content="Eighteen command-line tools for DNS leak auditing, DNSSEC and DoT, Encrypted Client Hello, Cloudflare WARP control, firewall-drop and ARP-spoof monitoring, and Wi-Fi recovery.">
+<meta property="og:url" content="https://doug445.github.io/Panoptes/">
+<meta property="og:image" content="https://doug445.github.io/Panoptes/card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "SoftwareApplication",
+      "name": "Panoptes",
+      "description": "Linux network monitoring, DNS hardening and intrusion-investigation suite: DNS leak auditing, DNSSEC and DNS-over-TLS enforcement, Encrypted Client Hello (an ECH-capable curl and ECH in every browser), Cloudflare WARP control, firewalld/nftables drop monitoring, ARP-spoofing detection and Wi-Fi recovery.",
+      "applicationCategory": "SecurityApplication",
+      "operatingSystem": "Linux",
+      "softwareVersion": "2.5.0",
+      "license": "https://opensource.org/licenses/MIT",
+      "url": "https://doug445.github.io/Panoptes/",
+      "downloadUrl": "https://github.com/doug445/Panoptes",
+      "codeRepository": "https://github.com/doug445/Panoptes",
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "author": { "@type": "Person", "name": "William MacKinnon", "url": "https://github.com/doug445" }
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        { "@type": "Question", "name": "Which Linux distributions does Panoptes support?", "acceptedAnswer": { "@type": "Answer", "text": "It is built and used daily on Fedora, and tested on Linux Mint, Manjaro, EndeavourOS, Debian/Ubuntu and Fedora Asahi Remix. Anything running systemd-resolved and NetworkManager is in scope, and its dependency installer understands dnf, apt, pacman, zypper and apk." } },
+        { "@type": "Question", "name": "Will installing it change my system?", "acceptedAnswer": { "@type": "Answer", "text": "Nothing installs a service or changes your system until you ask it to. audit-dns.sh and netcheck are strictly read-only, harden-dns.sh supports --dry-run, and wifi-recover.sh diagnoses without changing anything unless you pass --repair." } },
+        { "@type": "Question", "name": "Why does turning Cloudflare WARP off make my browser think it is offline?", "acceptedAnswer": { "@type": "Answer", "text": "DNS lookups in flight at that moment fail DNSSEC validation because their transport disappeared mid-chain, and systemd-resolved caches the failures. resolvectl flush-caches clears them. FallbackDNS= does not help: it is only used when DNS= is empty." } },
+        { "@type": "Question", "name": "Does it touch Tor Browser or Mullvad Browser?", "acceptedAnswer": { "@type": "Answer", "text": "No. ech-browsers.sh never touches them: they resolve through their proxy circuit on purpose, and pointing them at a DoH resolver would send lookups around it." } }
+      ]
+    }
+  ]
+}
+</script>
+<style>
+.logo-panel { margin-bottom: 1.75rem; }
+.logo-panel img { display: block; width: 100%; max-width: 640px; height: auto; border-radius: 12px; }
+</style>
+</head>
+<body>
+
+<nav class="sitenav" aria-label="Site">
+  <div class="wrap">
+    <a class="brand" href="./">Panoptes</a>
+    <a href="wifi-connected-no-internet-linux/">Wi-Fi: no internet</a>
+    <a href="dns-leak-test-linux/">DNS leak test</a>
+    <a href="encrypted-client-hello-linux/">ECH on Linux</a>
+    <a href="https://github.com/doug445/Panoptes">GitHub</a>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="logo-panel"><img src="panoptes-logo.svg" width="1138" height="341" alt="Panoptes logo: Superior Linux Network Security"></div>
+    <p class="eyebrow">Linux · systemd-resolved + NetworkManager · MIT</p>
+    <h1>DNS leak auditing, Encrypted Client Hello and a network watch for Linux</h1>
+    <p class="lede">
+      Eighteen field-tested command-line tools, each written after a real outage that took hours
+      to diagnose by hand. They audit everything that can set your DNS and show where a leak
+      could get in. They enforce DNSSEC and DNS-over-TLS, build a curl that speaks Encrypted Client
+      Hello and switch ECH on in every browser you have. They also control Cloudflare WARP, watch
+      firewall drops and ARP spoofing, and investigate any address that knocks.
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/doug445/Panoptes">Get it on GitHub</a>
+      <a class="btn" href="#quick-start">Quick start</a>
+      <a class="btn" href="#problems">Fix a specific problem</a>
+    </div>
+    <ul class="facts" aria-label="At a glance">
+      <li>v2.5.0</li><li>Free and open source</li><li>DNSSEC + DoT</li><li>ECH</li>
+      <li>Cloudflare WARP</li><li>Fedora · Debian · Arch · openSUSE · Alpine</li>
+    </ul>
+  </div>
+</header>
+
+<main class="wrap">
+
+<h2 id="problems">Fix a specific problem</h2>
+<div class="cards">
+  <a class="card" href="wifi-connected-no-internet-linux/"><strong>Wi-Fi connected, but no internet</strong><span>Diagnose it layer by layer: link, routes, DNS, a leftover VPN or kill-switch, a captive portal.</span></a>
+  <a class="card" href="dns-leak-test-linux/"><strong>DNS leak test on Linux</strong><span>Which resolver is really answering under systemd-resolved, and whether DNSSEC and DoT actually work.</span></a>
+  <a class="card" href="encrypted-client-hello-linux/"><strong>Encrypted Client Hello on Linux</strong><span>What ECH hides, a curl that can speak it, and switching it on in Firefox and Chromium browsers.</span></a>
+</div>
+
+<h2 id="why">Why this exists</h2>
+<p>
+  Most network trouble on a modern Linux desktop isn't a routing problem. It's a DNS problem that
+  looks like one. Your VPN pushed its own resolver, DHCP quietly overrode the one you configured,
+  <code>systemd-resolved</code> is answering from a per-link server you never chose, or a
+  kill-switch left an <code>nftables</code> table behind after its daemon died.
+</p>
+<p>
+  <code>netmaster</code> exists because a Wi-Fi link associated fine, the LAN worked, and the
+  internet was gone, and stayed gone across reboots. The cause was a stale VPN <code>tun</code>
+  device that NetworkManager had adopted and persisted, with hundreds of static routes.
+  <code>probesource</code> exists because "who is this address and why is it knocking" deserved a
+  better answer than four terminals of <code>whois</code>, <code>dig</code> and
+  <code>tcpdump</code>.
+</p>
+
+<h2 id="quick-start">Quick start</h2>
+<div class="codeblock"><pre><code>git clone https://github.com/doug445/Panoptes.git
+cd Panoptes
+sudo ./install.sh</code></pre></div>
+<div class="codeblock"><pre><code>checkdns              # resolver, WARP, mDNS and ECH status in one readout
+sudo audit-dns.sh     # what controls DNS here, and where a leak could get in
+netcheck              # interfaces, Wi-Fi band/bitrate, firewall, whois
+ech-browsers.sh       # turn on Encrypted Client Hello in every browser you have</code></pre></div>
+<p>Nothing installs a service or changes your system until you ask it to. <code>audit-dns.sh</code>
+  and <code>netcheck</code> are strictly read-only. The installer works out which of the suite's
+  ~45 requirements are missing and installs them with dnf, apt, pacman, zypper or apk.</p>
+
+<h2 id="tools">The tools</h2>
+<div class="table-scroll"><table>
+  <thead><tr><th>Area</th><th>Tools</th><th>What they do</th></tr></thead>
+  <tbody>
+    <tr><td><strong>DNS</strong></td><td><code>audit-dns.sh</code>, <code>harden-dns.sh</code>, <code>checkdns</code>, <code>dns-toggle</code>, <code>dns-tray</code></td><td>Read-only audit of everything that can set DNS. Idempotent DNSSEC and DNS-over-TLS hardening, with <code>--dry-run</code>. One-screen resolver status. A tray toggle between two encrypted resolvers, AdGuard and Cloudflare 1.1.1.2.</td></tr>
+    <tr><td><strong>ECH</strong></td><td><code>ech-build.sh</code>, <code>ech-browsers.sh</code></td><td>Builds an ECH-capable curl into its own prefix, which no distribution ships, and verifies it with a real <code>--ech hard</code> handshake. Enables ECH and the secure DNS it needs in every Firefox- and Chromium-family browser, native, Flatpak or Snap. Never touches Tor Browser or Mullvad Browser.</td></tr>
+    <tr><td><strong>Watch</strong></td><td><code>netwatch</code>, <code>nettop</code>, <code>netcheck</code>, <code>probesource</code></td><td>Desktop alerts for firewalld drops, new inbound connections and ARP anomalies. LAN and WAN hosts with vendors. A full interface and Wi-Fi readout. Investigation of any address, passive first.</td></tr>
+    <tr><td><strong>Repair</strong></td><td><code>netmaster</code>, <code>wifi-recover.sh</code>, <code>warp-setup.sh</code>, <code>warp-killswitch</code>, <code>warp-tray</code></td><td>The master network repair tool. Wi-Fi diagnosis, which changes nothing unless you pass <code>--repair</code>. Cloudflare WARP set up in tunnel-only mode, and a kill-switch that tears it down to nothing and restores it.</td></tr>
+  </tbody>
+</table></div>
+<p><code>probesource</code>'s passive tactics send nothing to the target. Its active tactics are for
+  hosts and networks you own or are authorised to test.</p>
+
+<h2 id="faq">FAQ</h2>
+<details>
+  <summary>Which Linux distributions does Panoptes support?</summary>
+  <p>It is built and used daily on Fedora, and tested on Linux Mint, Manjaro, EndeavourOS,
+    Debian/Ubuntu and Fedora Asahi Remix. Anything running systemd-resolved and NetworkManager is in
+    scope, and its dependency installer understands dnf, apt, pacman, zypper and apk.</p>
+</details>
+<details>
+  <summary>Will installing it change my system?</summary>
+  <p>Nothing installs a service or changes your system until you ask it to. audit-dns.sh and
+    netcheck are strictly read-only, harden-dns.sh supports --dry-run, and wifi-recover.sh
+    diagnoses without changing anything unless you pass --repair.</p>
+</details>
+<details>
+  <summary>Why does turning Cloudflare WARP off make my browser think it is offline?</summary>
+  <p>DNS lookups in flight at that moment fail DNSSEC validation because their transport
+    disappeared mid-chain, and systemd-resolved caches the failures. resolvectl flush-caches clears
+    them. FallbackDNS= does not help: it is only used when DNS= is empty.</p>
+</details>
+<details>
+  <summary>Does it touch Tor Browser or Mullvad Browser?</summary>
+  <p>No. ech-browsers.sh never touches them: they resolve through their proxy circuit on purpose,
+    and pointing them at a DoH resolver would send lookups around it.</p>
+</details>
+
+<p>On a Mac? The macOS counterpart is
+  <a href="https://doug445.github.io/macOS-SecureNetwork-Suite/">macOS-SecureNetwork-Suite</a>.</p>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><strong>Panoptes</strong> by William MacKinnon
+      (<a href="https://github.com/doug445">doug445</a>) ·
+      <a href="https://github.com/doug445/Panoptes">Source on GitHub</a> ·
+      <a href="https://github.com/doug445/Panoptes/releases">Releases</a></p>
+    <p>Independent project. Not affiliated with Cloudflare, Mozilla, Google or any Linux distribution.</p>
+    <p>Copyright © 2026 William MacKinnon. Code under the MIT licence. Page last updated 14 October 2026.</p>
+  </div>
+</footer>
+
+<script>
+document.querySelectorAll('.codeblock').forEach(function (block) {
+  var btn = document.createElement('button');
+  btn.className = 'copy'; btn.type = 'button'; btn.textContent = 'Copy';
+  btn.addEventListener('click', function () {
+    navigator.clipboard.writeText(block.querySelector('code').innerText).then(function () {
+      btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
+    }).catch(function () { btn.textContent = 'Select + copy'; });
+  });
+  block.appendChild(btn);
+});
+</script>
+</body>
+</html>
