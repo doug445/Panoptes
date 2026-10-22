@@ -18,6 +18,7 @@ Arch, openSUSE and Alpine.
 
 [![lint](https://github.com/doug445/Panoptes/actions/workflows/lint.yml/badge.svg)](https://github.com/doug445/Panoptes/actions/workflows/lint.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Free and open source](https://img.shields.io/badge/Free%20and%20open%20source-brightgreen.svg)](LICENSE)
 ![Shell](https://img.shields.io/badge/shell-bash-4EAA25)
 ![Platform](https://img.shields.io/badge/platform-Linux-blue)
 
