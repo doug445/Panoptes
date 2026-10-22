@@ -30,6 +30,12 @@
 # fix-warp-killswitch.sh, mac-test.sh. Delegates to (but does not require)
 # wifi-recover.sh, netrescue, audit-dns.sh, dns-toggle, warp-killswitch.
 #
+# With warp-killswitch v3 installed (warp-killswitch/install.sh), rung R4
+# delegates to `warp-killswitch purge` (v4+v6 rules, every nft family, main-
+# table routes, the tun), and its watchdog + warp-svc ExecStopPost purge heal
+# most blackholes before netmaster is ever needed. `netmaster status` shows
+# whether they are active.
+#
 # ---------------------------------------------------------------------------
 # THE OUTAGE THIS WAS BUILT FROM  (M2Max, 2026-08-13)
 #
@@ -405,7 +411,9 @@ detect_fw_lockout() {
 # D5. warp-killswitch state machine consistency.
 KS_KILLED=0; KS_IMMUTABLE=0; KS_RELOCK=0
 detect_killswitch() {
-    [ -f "$RESOLVED_CONF.warpkill-bak" ] && KS_KILLED=1 || KS_KILLED=0
+    # v3 keeps a dedicated marker (down --keep-dns leaves resolved.conf alone).
+    { [ -f "$RESOLVED_CONF.warpkill-bak" ] || [ -f /var/lib/warp-killswitch/killed ]; } \
+        && KS_KILLED=1 || KS_KILLED=0
     [ -f "$RESOLVED_CONF.warpkill-relock" ] && KS_RELOCK=1 || KS_RELOCK=0
     KS_IMMUTABLE=0
     $LSATTR "$RESOLVED_CONF" 2>/dev/null | $AWK 'NR==1{print $1}' | $GREP -q 'i' && KS_IMMUTABLE=1
@@ -685,6 +693,18 @@ fix_shadow_profiles() {
 fix_stale_warp() {
     $SCTL is-active --quiet warp-svc 2>/dev/null && return 1
     local did=1
+    # warp-killswitch v3 knows every artifact WARP leaves (v4+v6 policy rules,
+    # nft tables in every family, main-table routes, the tun). Delegate.
+    if [ -x "$KILLSWITCH" ] && $GREP -q '^    purge)' "$KILLSWITCH" 2>/dev/null; then
+        if $NFT list tables 2>/dev/null | $GREP -qi cloudflare \
+           || $IP link show "$WARP_IF" >/dev/null 2>&1 \
+           || { $IP rule show; $IP -6 rule show; } 2>/dev/null | $GREP -qE 'lookup 65743|fwmark 0x100cf'; then
+            step "R4  stale WARP artifacts"
+            act "warp-killswitch purge (rules v4+v6, all nft tables, routes, tun)" "" $KILLSWITCH purge
+            return 0
+        fi
+        return 1
+    fi
     if $NFT list tables 2>/dev/null | $GREP -q cloudflare-warp; then
         step "R4  stale WARP artifacts"
         act "delete nft table inet cloudflare-warp" "" $NFT delete table inet cloudflare-warp
@@ -804,6 +824,7 @@ cmd_status() {
     echo "  dns        $($RESOLVECTL status 2>/dev/null | $AWK -F': ' '/DNS Servers|Current DNS Server/{print $2; exit}')"
     echo "  dns-proto  $($RESOLVECTL status 2>/dev/null | $AWK -F': ' '/Protocols/{print $2; exit}')"
     echo "  killswitch $([ -x "$KILLSWITCH" ] && $KILLSWITCH state 2>/dev/null || echo '<not installed>')"
+    echo "  watchdog   $($SCTL is-active warp-watchdog 2>/dev/null || echo inactive)   crash-purge=$([ -f /etc/systemd/system/warp-svc.service.d/50-warp-killswitch.conf ] && echo on || echo OFF)"
     detect_guard && echo "  guard      ${C_G}installed${C_0} ($WARP_IF unmanaged)" \
                  || echo "  guard      ${C_R}MISSING${C_0} — run: netmaster harden"
     detect_blackhole
@@ -1159,6 +1180,8 @@ cmd_warp() {
         echo "  routes in table 65743:       $($IP route show table 65743 2>/dev/null | $GREP -c "dev $WARP_IF")  (normal when connected)"
         echo "  NM manages the tun:          $($NM -t -f DEVICE,STATE device status 2>/dev/null | $AWK -F: -v i="$WARP_IF" '$1==i{print $2}' || echo '<absent>')  (must be 'unmanaged')"
         detect_guard && ok "durable guard installed" || bad "durable guard MISSING — run: netmaster harden"
+        if $SCTL is-active --quiet warp-watchdog 2>/dev/null; then ok "warp-watchdog active — blackholes self-heal"
+        else warn "warp-watchdog not running — install warp-killswitch v3 (warp-killswitch/install.sh)"; fi
         ;;
       off)
         hdr "WARP off"
