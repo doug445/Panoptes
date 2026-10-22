@@ -1,4 +1,5 @@
 #!/bin/bash
+# warp-killswitch v3 — Cloudflare WARP kill-switch, self-healer and watchdog.
 #
 # Panoptes — the all-seeing network watch
 # https://github.com/doug445/Panoptes
@@ -24,103 +25,320 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 #
-# Last-resort Cloudflare WARP kill-switch helper (root). Installed by
-# warp-killswitch install.sh. Distro-agnostic (systemd + systemd-resolved).
+# Installed by warp-killswitch install.sh. Root only. systemd + systemd-resolved.
 #
-#   down   tear WARP + its whole network stack down to nothing, stop + DISABLE
-#          the daemon (persists across reboot), drop to plain DNS (1.1.1.2).
-#   up     restore the previous DNS verbatim, re-enable + start the daemon,
-#          reconnect WARP.
-#   state  print 'killed' or 'armed'.
+#   down [--keep-dns] [--fast]
+#          Tear WARP and its whole network stack down to nothing: stop + DISABLE
+#          the daemon (persists across reboot), remove the tun, its policy rules
+#          and route tables (v4 AND v6, numeric tables AND main), every
+#          cloudflare-warp nft table, drop to plain DNS (1.1.1.2, captive-portal
+#          friendly; --keep-dns leaves your resolver config alone), then PROVE
+#          plain internet works, escalating until it does.
+#   up     Restore DNS verbatim, re-enable + start the daemon, connect, and WAIT
+#          for a verified working tunnel. If that never happens, roll back to a
+#          clean disconnected state instead of leaving a lockdown firewall up.
+#   heal   One-shot smart repair (what the watchdog runs). Decides between
+#          "not WARP", stale-artifact purge, soft reset (disconnect/connect),
+#          and hard teardown, based on evidence. Safe to run any time.
+#   watchdog
+#          Run forever (systemd service): heal when the link is up but the
+#          internet is dead for ~45 s, with back-off. Never acts while killed.
+#   purge  Remove leftover WARP artifacts only (no DNS/daemon changes). Wired as
+#          ExecStopPost of warp-svc so a crash can never leave the drop
+#          firewall behind. Non-blocking; exits 0 always.
+#   status One-screen health readout.   verify  online|offline (exit 0|1).
+#   state  killed|armed.                sleep-pre / sleep-post  (systemd hook)
 #
-# Touches ONLY WARP's own artifacts + systemd-resolved. firewalld/netwatch are
-# never touched. Idempotent. WARP's routing table is DISCOVERED, not hardcoded.
-# If resolved.conf is locked with `chattr +i` (hardened boxes / DNS tray), 'down'
-# drops the flag and leaves it UNLOCKED while killed; 'up' restores the original
-# immutable posture on rebuild.
+# Touches ONLY WARP's own artifacts, systemd-resolved and (for a connectivity
+# re-check) NetworkManager. firewalld and other tunnels are never touched.
+# Every warp-cli call is time-bounded so a wedged daemon cannot hang us.
 set -u
+export LC_ALL=C
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Interactive rc files on these boxes shadow commands (cat->bat, cp/mv/rm -i,
+# find->fd, du->ncdu, ls->eza, grep with options, a diff function). A
+# non-interactive bash never expands aliases, but nothing here may depend on
+# that: absolute paths for every shadowed command, no exceptions.
+CAT=/usr/bin/cat;  [ -x "$CAT" ]  || CAT=/bin/cat
+CP=/usr/bin/cp;    [ -x "$CP" ]   || CP=/bin/cp
+MV=/usr/bin/mv;    [ -x "$MV" ]   || MV=/bin/mv
+RM=/usr/bin/rm;    [ -x "$RM" ]   || RM=/bin/rm
+GREP=/usr/bin/grep; [ -x "$GREP" ] || GREP=/bin/grep
 
-RESOLVED_CONF="/etc/systemd/resolved.conf"
-BACKUP="/etc/systemd/resolved.conf.warpkill-bak"
-WARP_IF="CloudflareWARP"
+RESOLVED_CONF=/etc/systemd/resolved.conf
+BACKUP=$RESOLVED_CONF.warpkill-bak          # exists  => DNS is swapped to plain
+RELOCK_FLAG=$RESOLVED_CONF.warpkill-relock  # exists  => re-apply chattr +i on up
+STATE_DIR=/var/lib/warp-killswitch
+KILLED_MARK=$STATE_DIR/killed               # exists  => user/watchdog killed WARP
+RUN_DIR=/run/warp-killswitch
+LOCK=$RUN_DIR/lock
+LOG=/var/log/warp-killswitch.log
+WARP_IF=CloudflareWARP
+WARP_TABLE_FALLBACK=65743
+WARP_FWMARK_FALLBACK=0x100cf
+NM_GUARD=/etc/NetworkManager/conf.d/99-warp-unmanaged.conf
+# /usr/local/bin/curl may be a minimal ECH build; prefer the distro one.
+CURL=/usr/bin/curl; [ -x "$CURL" ] || CURL=$(command -v curl || echo /bin/false)
+WARP="timeout 8 warp-cli --accept-tos"
 
-# Some hardened boxes lock resolved.conf with `chattr +i` (the DNS tray
-# unlock/relocks it). A write to an immutable file fails with EPERM, so we'd
-# silently NOT swap DNS. So: on 'down' we drop the flag to write the captive
-# config and LEAVE IT UNLOCKED while killed (so the portal config can be
-# hand-edited), recording in RELOCK_FLAG that it must be re-locked. On 'up' we
-# restore the backup and re-apply the immutable flag iff RELOCK_FLAG is present.
-# Degrades to a no-op where chattr/lsattr or the filesystem don't support it.
-RELOCK_FLAG="/etc/systemd/resolved.conf.warpkill-relock"
-resolved_is_immutable() {
-    lsattr "$RESOLVED_CONF" 2>/dev/null | awk 'NR==1{print $1}' | grep -q 'i'
+mkdir -p "$STATE_DIR" "$RUN_DIR" 2>/dev/null
+[ -f "$LOG" ] && [ "$(stat -c %s "$LOG" 2>/dev/null || echo 0)" -gt 2000000 ] && $MV -f "$LOG" "$LOG.1"
+
+TAG=${TAG:-warp-killswitch}
+log() {
+    local msg
+    msg="[$(date '+%F %T')] $TAG: $*"
+    printf '%s\n' "$msg"
+    printf '%s\n' "$msg" >> "$LOG" 2>/dev/null
 }
 
+# Desktop notification to every logged-in graphical user (we run as root).
+notify() {
+    local title="$1" body="$2" icon="${3:-network-vpn}" line uid user seen=" "
+    command -v notify-send >/dev/null 2>&1 || return 0
+    while read -r line; do
+        # SESSION UID USER SEAT LEADER CLASS TTY IDLE SINCE
+        set -- $line; uid="${2:-}"; user="${3:-}"
+        [ -n "$uid" ] && [ "$uid" -ge 1000 ] 2>/dev/null || continue
+        case "$seen" in *" $uid "*) continue ;; esac
+        seen="$seen$uid "
+        [ -S "/run/user/$uid/bus" ] || continue
+        timeout 6 runuser -u "$user" -- env DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+            XDG_RUNTIME_DIR="/run/user/$uid" notify-send -a "Cloudflare WARP" -i "$icon" \
+            --hint=string:desktop-entry:warp-tray "$title" "$body" >/dev/null 2>&1 &
+    done < <(loginctl list-sessions --no-legend 2>/dev/null)
+    return 0
+}
+
+is_killed() { [ -f "$KILLED_MARK" ] || [ -f "$BACKUP" ]; }
+
+resolved_is_immutable() {
+    lsattr "$RESOLVED_CONF" 2>/dev/null | awk 'NR==1{print $1}' | $GREP -q 'i'
+}
+
+warp_status() {
+    local s
+    s=$($WARP status 2>/dev/null | sed -n 's/^Status update: *//p' | head -1)
+    echo "${s:-unreachable}"
+}
+
+svc_active() { systemctl is-active --quiet warp-svc 2>/dev/null; }
+
+# ---------------------------------------------------------------- discovery --
+# Tables holding routes on the WARP interface, v4 AND v6, plus the known
+# default as a harmless fallback. Call BEFORE the tunnel goes down.
 discover_tables() {
-    # tables that currently hold routes on the WARP interface, plus the known
-    # default as a harmless fallback
-    { ip route show table all 2>/dev/null | grep " dev ${WARP_IF} " \
-          | grep -oE 'table [0-9]+' | awk '{print $2}'
-      echo 65743
+    {
+        ip -4 route show table all 2>/dev/null | $GREP -E " dev ${WARP_IF}( |$)" | $GREP -oE 'table [0-9]+' | awk '{print $2}'
+        ip -6 route show table all 2>/dev/null | $GREP -E " dev ${WARP_IF}( |$)" | $GREP -oE 'table [0-9]+' | awk '{print $2}'
+        echo "$WARP_TABLE_FALLBACK"
     } | sort -u
 }
 
-warp_down() {
-    # 1. graceful tunnel down (best effort)
-    warp-cli --accept-tos disconnect >/dev/null 2>&1
+# fwmarks used by rules that point at WARP's tables, plus the known default.
+discover_marks() {
+    local t
+    {
+        for t in $(discover_tables); do
+            { ip -4 rule show; ip -6 rule show; } 2>/dev/null | $GREP -E "lookup $t( |$)" | $GREP -oE 'fwmark 0x[0-9a-f]+' | awk '{print $2}'
+        done
+        echo "$WARP_FWMARK_FALLBACK"
+    } | sort -u
+}
 
-    # 2. capture WARP's routing tables BEFORE we tear the iface down
-    local tbls t p
-    tbls=$(discover_tables)
+artifacts_present() {
+    nft list tables 2>/dev/null | $GREP -qi cloudflare && return 0
+    ip link show "$WARP_IF" >/dev/null 2>&1 && return 0
+    { ip -4 rule show; ip -6 rule show; } 2>/dev/null | $GREP -qE "fwmark $WARP_FWMARK_FALLBACK|lookup $WARP_TABLE_FALLBACK( |$)" && return 0
+    { ip -4 route show table all; ip -6 route show table all; } 2>/dev/null | $GREP -qE " dev ${WARP_IF}( |$)" && return 0
+    return 1
+}
 
-    # 3. stop + disable the daemon so nothing rebuilds the stack (incl. at boot)
-    systemctl stop    warp-svc >/dev/null 2>&1
-    systemctl disable warp-svc >/dev/null 2>&1
+artifacts_desc() {
+    local nft iface rules r4 r6 ld
+    nft=$(nft list tables 2>/dev/null | $GREP -ci cloudflare)
+    ip link show "$WARP_IF" >/dev/null 2>&1 && iface=$(ip -br link show "$WARP_IF" 2>/dev/null | awk '{print $2}') || iface=absent
+    rules=$({ ip -4 rule show; ip -6 rule show; } 2>/dev/null | $GREP -cE "fwmark|lookup $WARP_TABLE_FALLBACK")
+    r4=$(ip -4 route show table all 2>/dev/null | $GREP -cE " dev ${WARP_IF}( |$)")
+    r6=$(ip -6 route show table all 2>/dev/null | $GREP -cE " dev ${WARP_IF}( |$)")
+    ld=$(ip -4 route show table all 2>/dev/null | $GREP -c linkdown)
+    echo "nft=$nft iface=$iface rules=$rules routes4=$r4 routes6=$r6 linkdown=$ld"
+}
 
-    # 4. force-remove WARP network artifacts the daemon may have left behind
-    ip link del "$WARP_IF" 2>/dev/null
-    for t in $tbls; do
-        ip route flush table "$t" 2>/dev/null
-        for p in $(ip rule show 2>/dev/null | grep -E "lookup ${t}( |\$)" | grep -oE '^[0-9]+'); do
-            ip rule del priority "$p" 2>/dev/null
+# ------------------------------------------------------------------- purge --
+purge_tables() {   # purge_tables "t1 t2 ..."
+    local t p fam
+    for t in $1; do
+        case "$t" in 253|254|255|main|default|local) continue ;; esac
+        ip -4 route flush table "$t" 2>/dev/null
+        ip -6 route flush table "$t" 2>/dev/null
+        for fam in -4 -6; do
+            for _ in 1 2 3 4 5 6 7 8; do
+                p=$(ip $fam rule show 2>/dev/null | $GREP -E "lookup $t( |$)" | head -1 | $GREP -oE '^[0-9]+')
+                [ -n "$p" ] || break
+                ip $fam rule del priority "$p" 2>/dev/null || break
+            done
         done
     done
-    nft delete table inet cloudflare-warp 2>/dev/null
+}
 
-    # --- asahi-netfix: main-table route purge v2 ---
-    # discover_tables() only matches NUMERIC table ids, so WARP's split-tunnel
-    # route set in the *main* table was never flushed. If the interface survives
-    # `ip link del` (persistent tun, or warp-svc still running while merely
-    # "Disconnected"), those routes stay behind as
-    # `... dev CloudflareWARP scope link linkdown` and, being more specific than
-    # the DHCP default, blackhole the whole internet while the LAN still works.
-    #
-    # NOTE: do NOT feed route lines back to `ip route del` — they end in the
-    # status flag `linkdown`, which is not valid input and makes every delete
-    # fail. Flush BY DEVICE instead.
-    if ip link show "$WARP_IF" >/dev/null 2>&1 \
-       || ip route show table all 2>/dev/null | grep -q " dev $WARP_IF"; then
-        # a .socket unit would re-activate the daemon and reinstall everything
-        systemctl stop warp-svc.socket 2>/dev/null
-        for _p in 1 2 3; do
-            ip -4 route flush dev "$WARP_IF" 2>/dev/null
-            ip -6 route flush dev "$WARP_IF" 2>/dev/null
-            for _t in $(ip route show table all 2>/dev/null | grep " dev $WARP_IF" \
-                        | grep -oE 'table [0-9]+' | awk '{print $2}' | sort -u); do
-                ip route flush table "$_t" 2>/dev/null
+purge_mark_rules() {
+    local m p fam
+    for m in $(discover_marks); do
+        for fam in -4 -6; do
+            for _ in 1 2 3 4 5 6 7 8; do
+                p=$(ip $fam rule show 2>/dev/null | $GREP -E "fwmark $m( |/|$)" | head -1 | $GREP -oE '^[0-9]+')
+                [ -n "$p" ] || break
+                ip $fam rule del priority "$p" 2>/dev/null || break
             done
-            ip route show table all 2>/dev/null | grep -q " dev $WARP_IF" || break
-            sleep 1
         done
+    done
+}
+
+# Every cloudflare-warp nft table, whatever family it was created in.
+purge_nft() {
+    local fam name
+    nft list tables 2>/dev/null | $GREP -i cloudflare | while read -r _ fam name; do
+        [ -n "${fam:-}" ] && [ -n "${name:-}" ] && nft delete table "$fam" "$name" 2>/dev/null
+    done
+    nft delete table inet cloudflare-warp 2>/dev/null
+    return 0
+}
+
+# Remove everything WARP leaves in the kernel. Routes are flushed BY DEVICE
+# (route lines print a trailing `linkdown` status flag that `ip route del`
+# rejects, and main-table routes have no numeric id to flush by table).
+# Returns 0 when nothing is left.
+purge_artifacts() {   # purge_artifacts ["extra tables"]
+    local tbls _pass
+    tbls="$(discover_tables | tr '\n' ' ') ${1:-}"
+    systemctl list-unit-files 2>/dev/null | $GREP -q '^warp-svc\.socket' && systemctl stop warp-svc.socket 2>/dev/null
+    for _pass in 1 2 3; do
+        ip -4 route flush dev "$WARP_IF" 2>/dev/null
+        ip -6 route flush dev "$WARP_IF" 2>/dev/null
+        purge_tables "$tbls"
+        purge_mark_rules
+        { ip -4 route show table all; ip -6 route show table all; } 2>/dev/null | $GREP -qE " dev ${WARP_IF}( |$)" || break
+        sleep 1
+    done
+    purge_nft
+    if ip link show "$WARP_IF" >/dev/null 2>&1; then
         ip link set "$WARP_IF" down 2>/dev/null
-        ip link del  "$WARP_IF" 2>/dev/null
+        ip link del "$WARP_IF" 2>/dev/null
     fi
-    # --- end asahi-netfix ---
+    ! artifacts_present
+}
 
+stop_daemon() {
+    systemctl list-unit-files 2>/dev/null | $GREP -q '^warp-svc\.socket' && systemctl stop warp-svc.socket 2>/dev/null
+    # A frozen (SIGSTOPped / hung) daemon never sees SIGTERM; wake it first.
+    systemctl kill -s CONT warp-svc >/dev/null 2>&1
+    if ! timeout 15 systemctl stop warp-svc >/dev/null 2>&1; then
+        log "  ! warp-svc did not stop in 15s — SIGKILL"
+        systemctl kill -s KILL warp-svc >/dev/null 2>&1
+        sleep 1
+    fi
+    systemctl disable warp-svc >/dev/null 2>&1
+}
 
-    # 5. drop to plain DNS for captive portals (back up the real conf once).
-    #    Reading an immutable file is fine; only the write below needs it unlocked.
-    [ -f "$BACKUP" ] || cp -a "$RESOLVED_CONF" "$BACKUP"
+# ------------------------------------------------------------------ probes --
+# Physical link: default-route device has carrier and the gateway answers ARP
+# (many APs — every motel one — drop ICMP to the gateway; never ping it alone).
+LINK_DEV=""; LINK_GW=""
+link_ok() {
+    local line
+    line=$(ip -4 route show default 2>/dev/null | head -1)
+    LINK_DEV=$(awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' <<<"$line")
+    LINK_GW=$(awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' <<<"$line")
+    [ -n "$LINK_DEV" ] || return 1
+    [ "$($CAT "/sys/class/net/$LINK_DEV/carrier" 2>/dev/null)" = 1 ] || return 1
+    [ -n "$LINK_GW" ] || return 0
+    command -v arping >/dev/null 2>&1 && timeout 6 arping -c 1 -w 2 -I "$LINK_DEV" "$LINK_GW" >/dev/null 2>&1 && return 0
+    ip neigh show "$LINK_GW" 2>/dev/null | $GREP -qE 'lladdr [0-9a-f:]+ (REACHABLE|STALE|DELAY|PROBE|PERMANENT)' && return 0
+    ping -c 1 -W 2 -n "$LINK_GW" >/dev/null 2>&1
+}
+
+# Raw-IP reachability, no DNS involved. ~2s when up, <=6s when down.
+online_now() {
+    local ip pids=() p ok=1
+    for ip in 1.1.1.1 8.8.8.8 9.9.9.9; do
+        ping -c 1 -W 2 -n "$ip" >/dev/null 2>&1 & pids+=($!)
+    done
+    for p in "${pids[@]}"; do wait "$p" && ok=0; done
+    [ "$ok" -eq 0 ] && return 0
+    timeout 4 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>/dev/null && return 0
+    timeout 4 bash -c 'exec 3<>/dev/tcp/8.8.8.8/443' 2>/dev/null && return 0
+    return 1
+}
+
+# A captive-portal redirect counts as WORKING for a teardown: the link is up
+# and the portal is reachable, which is exactly what the user needs.
+internet_or_portal() {
+    online_now && return 0
+    local code
+    code=$($CURL -s -m 6 -o /dev/null -w '%{http_code}' http://detectportal.firefox.com/success.txt 2>/dev/null)
+    case "$code" in 200|30[0-8]) return 0 ;; esac
+    return 1
+}
+
+portal_detected() {
+    local out code body
+    out=$($CURL -s -m 6 -w '\n%{http_code}' http://detectportal.firefox.com/success.txt 2>/dev/null)
+    code=${out##*$'\n'}; body=$(printf '%s' "${out%$'\n'*}" | tr -d '[:space:]')   # body is "success\n"
+    case "$code" in
+        200) [ "$body" = success ] && return 1 || return 0 ;;
+        30[0-8]) return 0 ;;
+    esac
+    code=$($CURL -s -m 6 -o /dev/null -w '%{http_code}' http://connectivitycheck.gstatic.com/generate_204 2>/dev/null)
+    [ "$code" = 204 ] && return 1
+    [ -n "$code" ] && [ "$code" != 000 ] && return 0
+    return 1
+}
+
+dns_ok() { timeout 8 resolvectl query -t A cloudflare.com >/dev/null 2>&1; }
+
+# Bringing the tunnel up or down kills every DNS lookup in flight over it; those
+# fail DNSSEC with 'failed-auxiliary' and resolved CACHES the failure, which
+# reads as "no internet". Flush, and drop the per-server feature grades learned
+# over the old transport so DoT/DNSSEC get re-probed.
+flush_resolver() {
+    timeout 8 resolvectl flush-caches >/dev/null 2>&1
+    timeout 8 resolvectl reset-server-features >/dev/null 2>&1
+}
+
+dns_fix() {
+    flush_resolver
+    dns_ok && return 0
+    systemctl restart systemd-resolved >/dev/null 2>&1
+    sleep 1
+    dns_ok
+}
+
+# NM caches its connectivity probe for up to 5 minutes; a probe that landed
+# during a WARP transition leaves the desktop saying "limited". Force it.
+nm_refresh() {
+    command -v nmcli >/dev/null 2>&1 || return 0
+    ( timeout 20 nmcli networking connectivity check >/dev/null 2>&1 ) &
+}
+
+egress_line() {
+    timeout 10 "$CURL" -s -m 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | $GREP -E '^(warp|colo)=' | tr '\n' ' '
+}
+
+wait_connected() {   # wait_connected SECONDS — Connected AND raw internet works
+    local deadline=$(( $(date +%s) + $1 )) st
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        st=$(warp_status)
+        if [ "$st" = Connected ] && online_now; then return 0; fi
+        case "$st" in Disconnected|"Registration Missing"|unreachable) : ;; esac
+        sleep 2
+    done
+    return 1
+}
+
+# --------------------------------------------------------------------- DNS --
+write_plain_dns() {
+    [ -f "$BACKUP" ] || $CP -a "$RESOLVED_CONF" "$BACKUP"
     if resolved_is_immutable; then
         chattr -i "$RESOLVED_CONF" 2>/dev/null && : > "$RELOCK_FLAG"
     fi
@@ -135,36 +353,315 @@ DNSSEC=no
 MulticastDNS=no
 LLMNR=no
 RESOLVED_EOF
-    # left UNLOCKED on purpose while killed; RELOCK_FLAG remembers to re-lock on 'up'.
+    # left UNLOCKED on purpose while killed (hand-edit for a stubborn portal);
+    # RELOCK_FLAG remembers to re-lock on 'up'.
     systemctl restart systemd-resolved >/dev/null 2>&1
-    return 0
+    flush_resolver
+}
+
+restore_dns() {
+    [ -f "$BACKUP" ] || return 0
+    resolved_is_immutable && chattr -i "$RESOLVED_CONF" 2>/dev/null
+    cp -a "$BACKUP" "$RESOLVED_CONF"
+    if [ -f "$RELOCK_FLAG" ]; then
+        chattr +i "$RESOLVED_CONF" 2>/dev/null
+        rm -f "$RELOCK_FLAG"
+    fi
+    rm -f "$BACKUP"
+    systemctl restart systemd-resolved >/dev/null 2>&1
+    log "  DNS restored from backup"
+}
+
+# -------------------------------------------------------------- escalation --
+# Only ever runs when the internet is ALREADY dead after a teardown.
+escalate() {
+    log "  ! still offline — escalating"
+    local t dev
+    # 1. policy rules pointing at tables that are now EMPTY (their device is
+    #    gone) can only dangle; and routes into a DOWN virtual device only
+    #    blackhole. Physical NICs and the kernel's own tables are never touched.
+    for t in $({ ip -4 rule show; ip -6 rule show; } 2>/dev/null | $GREP -oE 'lookup [0-9]+' | awk '{print $2}' | sort -u); do
+        case "$t" in 253|254|255) continue ;; esac
+        if [ -z "$(ip -4 route show table "$t" 2>/dev/null)$(ip -6 route show table "$t" 2>/dev/null)" ]; then
+            purge_tables "$t"; log "  swept dangling rule(s) for empty table $t"
+        fi
+    done
+    link_ok >/dev/null 2>&1 || true
+    for dev in $(ip -4 route show table all 2>/dev/null | $GREP linkdown | $GREP -oE 'dev [^ ]+' | awk '{print $2}' | sort -u); do
+        [ "$dev" = lo ] && continue
+        [ "$dev" = "${LINK_DEV:-}" ] && continue
+        [ -e "/sys/class/net/$dev/device" ] && continue   # physical NIC — leave it
+        ip -4 route flush dev "$dev" 2>/dev/null; ip -6 route flush dev "$dev" 2>/dev/null
+        log "  flushed linkdown routes on virtual device $dev"
+    done
+    internet_or_portal && { log "  + recovered: stale rules/routes swept"; return 0; }
+    # 2. resolved may be wedged on a dead transport
+    systemctl restart systemd-resolved >/dev/null 2>&1; sleep 1
+    internet_or_portal && { log "  + recovered: restarted systemd-resolved"; return 0; }
+    # 3. rebuild the link from scratch
+    if command -v nmcli >/dev/null 2>&1; then
+        nmcli networking off >/dev/null 2>&1; sleep 2; nmcli networking on >/dev/null 2>&1
+    else
+        systemctl restart NetworkManager >/dev/null 2>&1
+    fi
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        sleep 2
+        internet_or_portal && { log "  + recovered: network bounce"; return 0; }
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------- commands --
+warp_down() {
+    local keep_dns=0 fast=0 a tbls
+    for a in "$@"; do case "$a" in --keep-dns) keep_dns=1 ;; --fast) fast=1 ;; esac; done
+    log "TEARDOWN begin (keep_dns=$keep_dns) status=$(warp_status) $(artifacts_desc)"
+    # 1. discover FIRST — after disconnect there is nothing left to find
+    tbls=$(discover_tables | tr '\n' ' ')
+    log "  routing tables: ${tbls:-none}"
+    # 2. graceful (time-bounded) tunnel down
+    [ "$fast" -eq 0 ] && $WARP disconnect >/dev/null 2>&1
+    # 3. stop + disable the daemon so nothing rebuilds the stack (incl. at boot)
+    stop_daemon
+    log "  warp-svc stopped + disabled"
+    # 4. force-remove whatever is left
+    if purge_artifacts "$tbls"; then log "  artifacts purged: clean"; else log "  ! artifacts remain: $(artifacts_desc)"; fi
+    : > "$KILLED_MARK"
+    # 5. DNS
+    if [ "$keep_dns" -eq 0 ]; then write_plain_dns; log "  DNS -> plain 1.1.1.2 (captive-portal friendly)"; else flush_resolver; log "  DNS left as configured"; fi
+    nm_refresh
+    # 6. PROVE it
+    for _ in 1 2 3 4 5; do
+        if internet_or_portal; then
+            log "  = ONLINE (plain internet)"
+            notify "WARP torn down" "Plain internet is working.$([ "$keep_dns" -eq 0 ] && echo ' DNS is plain 1.1.1.2 until you Rebuild.')" network-offline
+            return 0
+        fi
+        sleep 2
+    done
+    if escalate; then
+        log "  = ONLINE (after escalation)"; nm_refresh
+        notify "WARP torn down" "Internet recovered after escalation." network-offline
+        return 0
+    fi
+    log "  = STILL OFFLINE — link/upstream problem, not WARP"
+    notify "WARP torn down — still offline" "WARP is gone but there is still no internet. Check Wi-Fi, the AP or the ISP." network-error
+    return 1
 }
 
 warp_up() {
-    if [ -f "$BACKUP" ]; then
-        resolved_is_immutable && chattr -i "$RESOLVED_CONF" 2>/dev/null
-        cp -a "$BACKUP" "$RESOLVED_CONF"
-        # restore the original immutable posture if 'down' had to remove it
-        if [ -f "$RELOCK_FLAG" ]; then
-            chattr +i "$RESOLVED_CONF" 2>/dev/null
-            rm -f "$RELOCK_FLAG"
-        fi
-        rm -f "$BACKUP"
-    fi
-    systemctl restart systemd-resolved >/dev/null 2>&1
+    log "REBUILD begin status=$(warp_status)"
+    restore_dns
+    rm -f "$KILLED_MARK"
+    systemctl unmask warp-svc >/dev/null 2>&1
     systemctl enable warp-svc >/dev/null 2>&1
     systemctl start  warp-svc >/dev/null 2>&1
-    for _ in 1 2 3 4 5 6 7 8; do
-        warp-cli --accept-tos status >/dev/null 2>&1 && break
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        timeout 5 warp-cli --accept-tos status >/dev/null 2>&1 && break
         sleep 1
     done
-    warp-cli --accept-tos connect >/dev/null 2>&1
+    $WARP connect >/dev/null 2>&1
+    if wait_connected 35; then
+        flush_resolver; nm_refresh
+        log "  = CONNECTED, tunnel verified: $(egress_line)"
+        notify "WARP rebuilt" "Tunnel up, DNS restored." network-vpn
+        return 0
+    fi
+    log "  ! no working tunnel after 35s (status=$(warp_status)) — rolling back to a clean disconnected state"
+    $WARP disconnect >/dev/null 2>&1; sleep 2
+    artifacts_present && purge_artifacts
+    flush_resolver; nm_refresh
+    if internet_or_portal; then
+        notify "WARP could not connect" "Left disconnected; plain internet works. Left-click the tray to retry." network-error
+    else
+        notify "WARP could not connect" "And plain internet is down too — check the link." network-error
+    fi
+    return 1
+}
+
+# Decide and repair. Exit codes: 0 healthy/repaired, 2 not-WARP (upstream),
+# 3 captive portal (WARP left off), 4 WARP left off (could not reconnect).
+heal() {
+    local why="${1:-manual}" st
+    TAG="warp-killswitch[heal:$why]"
+    if is_killed; then log "killed by user — nothing to do"; return 0; fi
+    if ! link_ok; then log "link layer down (dev=${LINK_DEV:-none} gw=${LINK_GW:-none}) — not a WARP problem"; return 2; fi
+    st=$(warp_status)
+    if online_now; then
+        if ! svc_active && artifacts_present; then
+            log "online, but warp-svc is dead and left artifacts ($(artifacts_desc)) — purging"
+            purge_artifacts && log "stale artifacts purged"
+        fi
+        if ! dns_ok; then
+            log "IP works but DNS fails — flushing resolver"
+            dns_fix && log "DNS recovered" || log "DNS still failing after resolver restart"
+        fi
+        return 0
+    fi
+    # OFFLINE with a live link.
+    if ! artifacts_present; then
+        log "offline, link up, NO WARP artifacts (status=$st) — upstream/ISP problem, not WARP"
+        return 2
+    fi
+    if ! svc_active; then
+        log "offline, warp-svc DEAD, artifacts remain ($(artifacts_desc)) — purging stale artifacts"
+        purge_artifacts; flush_resolver; nm_refresh
+        if internet_or_portal; then
+            log "recovered: stale artifacts purged"
+            notify "WARP cleaned up" "warp-svc had died and left its firewall behind. Removed; internet is back." network-offline
+            return 0
+        fi
+        return 2
+    fi
+    # daemon alive, artifacts present, internet dead => WARP is in the path.
+    log "offline, link up, WARP status=$st with artifacts ($(artifacts_desc)) — soft reset"
+    $WARP disconnect >/dev/null 2>&1
+    sleep 3
+    if artifacts_present; then
+        log "disconnect did NOT clear WARP's artifacts ($(artifacts_desc)) — daemon wedged; hard teardown"
+        warp_down --keep-dns --fast
+        local rc=$?
+        [ "$rc" -eq 0 ] && notify "WARP was blackholing — torn down" "The daemon was wedged. WARP is OFF (survives reboot). Right-click the tray: Rebuild when you want it back." network-error
+        return $rc
+    fi
+    if ! internet_or_portal; then
+        log "WARP removed cleanly but still offline — not WARP; reconnecting, backing off"
+        $WARP connect >/dev/null 2>&1
+        return 2
+    fi
+    if portal_detected; then
+        log "plain internet works and a CAPTIVE PORTAL is intercepting — leaving WARP off"
+        flush_resolver; nm_refresh
+        notify "Captive portal detected" "WARP left disconnected so you can log in. Reconnect from the tray afterwards." network-wireless
+        return 3
+    fi
+    log "plain internet works — retrying WARP connect once"
+    $WARP connect >/dev/null 2>&1
+    if wait_connected 30; then
+        flush_resolver; nm_refresh
+        log "recovered: soft reset ($(egress_line))"
+        notify "WARP recovered" "The tunnel was dead and has been reset." network-vpn
+        return 0
+    fi
+    log "reconnect failed (status=$(warp_status)) — leaving WARP disconnected"
+    $WARP disconnect >/dev/null 2>&1; sleep 2
+    artifacts_present && purge_artifacts
+    flush_resolver; nm_refresh
+    notify "WARP could not reconnect — left OFF" "Plain internet works. Left-click the tray to retry WARP later." network-error
+    return 4
+}
+
+watchdog() {
+    local interval=10 need=3 fails=0 dfails=0 backoff_until=0 now rc backoff
+    TAG="warp-watchdog"
+    log "started (interval=${interval}s, act after $need consecutive failures)"
+    while :; do
+        sleep "$interval"
+        if is_killed; then fails=0; dfails=0; continue; fi
+        now=$(date +%s)
+        if online_now; then
+            fails=0
+            if ! svc_active && artifacts_present; then
+                log "warp-svc dead with leftovers ($(artifacts_desc)) — purging"
+                "$0" purge >/dev/null 2>&1          # purge takes its own non-blocking lock
+            fi
+            if dns_ok; then dfails=0; else
+                dfails=$((dfails + 1))
+                if [ "$dfails" -ge "$need" ]; then
+                    log "IP up but DNS failing ($dfails x) — fixing resolver"; dns_fix; dfails=0
+                fi
+            fi
+            continue
+        fi
+        # a single missed ARP must not reset the count — only a confirmed online does
+        link_ok || continue
+        [ "$now" -lt "$backoff_until" ] && continue
+        fails=$((fails + 1))
+        if [ "$fails" -lt "$need" ]; then
+            log "offline with link up ($fails/$need) $(artifacts_desc)"
+            continue
+        fi
+        log "offline with link up ($fails/$need) warp=$(warp_status) $(artifacts_desc) — healing"
+        fails=0
+        # heal takes the lock itself (with_lock); wrapping it in flock here
+        # would deadlock against that.
+        "$0" heal watchdog; rc=$?
+        case "$rc" in 0) backoff=60 ;; 3) backoff=600 ;; *) backoff=300 ;; esac
+        backoff_until=$(( $(date +%s) + backoff ))
+        log "heal rc=$rc — next action no sooner than ${backoff}s"
+    done
+}
+
+# ExecStopPost of warp-svc: never let a dead daemon leave its DROP firewall.
+purge_cmd() {
+    TAG="warp-killswitch[purge]"
+    if artifacts_present; then
+        log "warp-svc stopped with leftovers ($(artifacts_desc)) — purging"
+        purge_artifacts && log "clean" || log "! could not fully purge: $(artifacts_desc)"
+        flush_resolver
+    fi
     return 0
 }
 
+sleep_pre() {
+    TAG="warp-killswitch[sleep]"
+    is_killed && return 0
+    if [ "$(warp_status)" = Connected ]; then
+        : > "$RUN_DIR/reconnect-after-resume"
+        log "suspend: disconnecting WARP cleanly"
+        timeout 10 warp-cli --accept-tos disconnect >/dev/null 2>&1
+    fi
+    return 0
+}
+
+sleep_post() {
+    TAG="warp-killswitch[sleep]"
+    [ -f "$RUN_DIR/reconnect-after-resume" ] || return 0
+    rm -f "$RUN_DIR/reconnect-after-resume"
+    is_killed && return 0
+    log "resume: reconnecting WARP"
+    ( sleep 2; $WARP connect >/dev/null 2>&1; sleep 6; flush_resolver; nm_refresh ) >/dev/null 2>&1 &
+    return 0
+}
+
+status_cmd() {
+    local killed="armed" dns="intact" st eg link inet d
+    is_killed && killed="KILLED"
+    [ -f "$BACKUP" ] && dns="swapped to plain (backup present)"
+    st=$(warp_status)
+    echo "warp-killswitch status — $(uname -n)  $(date '+%F %T')"
+    echo "  killswitch : $killed   (dns: $dns)"
+    echo "  warp-svc   : $(systemctl is-active warp-svc 2>&1) / $(systemctl is-enabled warp-svc 2>&1)"
+    echo "  warp-cli   : $st"
+    if link_ok; then link="ok  dev=$LINK_DEV gw=${LINK_GW:-none}"; else link="DOWN dev=${LINK_DEV:-none} gw=${LINK_GW:-none}"; fi
+    echo "  link       : $link"
+    if online_now; then inet=online; else inet=OFFLINE; fi
+    dns_ok && d=ok || d=FAIL
+    echo "  internet   : $inet   dns: $d"
+    eg=$(egress_line); echo "  egress     : ${eg:-unreachable}"
+    echo "  artifacts  : $(artifacts_desc)"
+    echo "  NM guard   : $([ -f "$NM_GUARD" ] && $GREP -q "interface-name:$WARP_IF" "$NM_GUARD" && echo installed || echo MISSING)"
+    echo "  NM tun     : $(nmcli -t -f DEVICE,STATE device status 2>/dev/null | awk -F: -v i="$WARP_IF" '$1==i{print $2}' | head -1)"
+    echo "  NM concheck: $([ -f /etc/NetworkManager/conf.d/20-connectivity-disable.conf ] && echo 'off (watchdog is the monitor)' || echo 'ON — device-bound probe is dropped by WARP; expect false limited')   nm says: $(nmcli -t -f CONNECTIVITY general 2>/dev/null)"
+    echo "  watchdog   : $(systemctl is-active warp-watchdog 2>&1) / $(systemctl is-enabled warp-watchdog 2>&1)"
+    echo "  svc drop-in: $([ -f /etc/systemd/system/warp-svc.service.d/50-warp-killswitch.conf ] && echo present || echo missing)"
+    echo "  sleep hook : $([ -x /usr/lib/systemd/system-sleep/warp-killswitch ] && echo present || echo missing)"
+    echo "  resolved   : $(resolvectl status 2>/dev/null | awk -F': ' '/Current DNS Server/{print $2; exit}')  immutable=$(resolved_is_immutable && echo yes || echo no)"
+    echo "  last log   : $(tail -n 1 "$LOG" 2>/dev/null)"
+}
+
+with_lock() { exec 9>"$LOCK"; flock -w 60 9 || { log "another warp-killswitch operation is running"; exit 5; }; }
+
 case "${1:-}" in
-    down)  warp_down ;;
-    up)    warp_up ;;
-    state) [ -f "$BACKUP" ] && echo killed || echo armed ;;
-    *)     echo "usage: $0 {down|up|state}" >&2; exit 2 ;;
+    down)       shift; with_lock; warp_down "$@" ;;
+    up)         with_lock; warp_up ;;
+    heal)       with_lock; heal "${2:-manual}" ;;
+    watchdog)   watchdog ;;
+    purge)      exec 9>"$LOCK"; flock -n 9 || exit 0; purge_cmd ;;
+    status)     status_cmd ;;
+    state)      is_killed && echo killed || echo armed ;;
+    verify)     if internet_or_portal; then echo online; exit 0; else echo offline; exit 1; fi ;;
+    sleep-pre)  sleep_pre ;;
+    sleep-post) sleep_post ;;
+    *)          echo "usage: $0 {down [--keep-dns] [--fast]|up|heal|watchdog|purge|status|state|verify}" >&2; exit 2 ;;
 esac

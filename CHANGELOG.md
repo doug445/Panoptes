@@ -3,6 +3,20 @@
 All notable changes to Panoptes are recorded here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **warp-killswitch v3.** `down` now removes WARP's v4 and v6 policy rules,
+  routes in every table (main included) and every `cloudflare-warp` nft table,
+  then proves plain internet works. `up` waits for a verified tunnel and rolls
+  back to a clean disconnected state if one never comes. New subcommands:
+  `heal`, `watchdog`, `purge`, `status`, `verify`, and `sleep-pre`/`sleep-post`.
+  Every `warp-cli` call is time-bounded.
+- **netmaster** recognizes warp-killswitch v3: rung R4 delegates to
+  `warp-killswitch purge`, and `status` / `warp` report the watchdog.
+- **warp-tray** adds Heal now and Status, and reads both kill markers.
+
 ## [2.5.0] — 2026-08-24
 
 ### Added
