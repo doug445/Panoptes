@@ -45,6 +45,10 @@ across reboots. `probesource` exists because "who is 5.42.x.x and why is it
 knocking" deserved a better answer than four terminals of `whois`, `dig` and
 `tcpdump`.
 
+## Why Panoptes
+
+Argus Panoptes, "the all-seeing", was the giant of Greek myth with a hundred eyes. Hera set him to guard Io, whom Zeus had hidden as a heifer, because he never slept: while some of his eyes rested, the rest kept watch, so nothing crossed the ground he guarded unseen. It took Hermes a whole night of stories and flute-playing to close every eye at once before he could kill him, and Hera set the hundred eyes in her peacock's tail so they would never be lost. That is the job this suite does for a Linux system: eyes on the resolver, the tunnel, the ARP table and the firewall log at the same time, and no moment when all of them are closed. 
+
 ## What Encrypted Client Hello is, and why it matters
 
 HTTPS encrypts what you send and receive. It does not encrypt **which site you
