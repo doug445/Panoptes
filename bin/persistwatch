@@ -33,9 +33,12 @@
 # new account. Removed rows are logged, not announced.
 #
 # Runs as root (persistwatch.service, written by endpoint-setup.sh). Keeps its
-# place in the log across restarts, notices rotation, and collapses a burst
-# (osqueryd's first pass after the pack is installed reports everything that
-# already exists) into one summary notification instead of a hundred.
+# place in the log across restarts and notices rotation. Two things keep it
+# from crying wolf: rows from a query's first run since osqueryd started
+# (osquery marks them counter=0 — the install-time pass that lists everything
+# that already exists, and the catch-up after a daemon restart) are folded
+# into one summary per batch instead of one alert each; and any batch with
+# more than a handful of new rows is summarised the same way.
 #
 # Usage:
 #   persistwatch            follow the log forever (what the service runs)
@@ -186,8 +189,15 @@ def read_new(ino, off):
     return [ln for ln in lines if ln.strip()], ino, off
 
 
+def summarise(rows):
+    by = {}
+    for query, _ in rows:
+        by[query] = by.get(query, 0) + 1
+    return ', '.join(f'{v} {k}' for k, v in sorted(by.items()))
+
+
 def process(lines):
-    added, removed = [], []
+    added, initial, removed = [], [], []
     for raw in lines:
         try:
             ev = json.loads(raw)
@@ -198,24 +208,30 @@ def process(lines):
             continue
         query = name[len(PREFIX):]
         cols = ev.get('columns') or {}
-        if ev.get('action') == 'added':
-            added.append((query, cols))
-        elif ev.get('action') == 'removed':
+        action = ev.get('action')
+        if action == 'removed':
             removed.append((query, cols))
+        elif action == 'added':
+            # counter 0 = this query's first run since osqueryd started
+            if str(ev.get('counter', '')) == '0':
+                initial.append((query, cols))
+            else:
+                added.append((query, cols))
     for query, cols in removed:
         log(f'removed {query}: ' + ' '.join(f'{k}={v}' for k, v in cols.items()))
+    if initial:
+        for query, cols in initial:
+            log('initial ' + describe(query, cols))
+        notify(f'{len(initial)} persistence rows on first pass',
+               f'{summarise(initial)}. These existed when osqueryd (re)started: the install-time '
+               f'inventory, or changes made while it was down. Review with persistcheck.', 'normal')
     if not added:
         return
     if len(added) > BURST:
         for query, cols in added:
             log('added ' + describe(query, cols))
-        by = {}
-        for query, _ in added:
-            by[query] = by.get(query, 0) + 1
-        summary = ', '.join(f'{v} {k}' for k, v in sorted(by.items()))
-        notify(f'{len(added)} persistence rows appeared',
-               f'{summary}. A first pass after install lists what already exists; '
-               f'otherwise something just changed a lot. Run persistcheck.', 'normal')
+        notify(f'{len(added)} persistence rows appeared at once',
+               f'{summarise(added)}. Something just changed a lot. Run persistcheck.', 'critical')
         return
     for query, cols in added:
         text = describe(query, cols)

@@ -57,7 +57,7 @@ ORDER = ['systemd_units_admin', 'crontab', 'startup_items', 'kernel_modules',
 KEY_COLS = {
     'systemd_units_admin': ['id', 'active_state', 'sub_state', 'fragment_path'],
     'crontab': ['path', 'minute', 'hour', 'day_of_month', 'month', 'day_of_week', 'command'],
-    'startup_items': ['name', 'path', 'args', 'source', 'username'],
+    'startup_items': ['name', 'path', 'args', 'source', 'status', 'username'],
     'kernel_modules': ['name', 'used_by'],
     'authorized_keys': ['username', 'algorithm', 'comment', 'key_file'],
     'sudoers': ['source', 'header', 'rule_details'],
