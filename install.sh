@@ -17,6 +17,7 @@
 #        ./install.sh --dry-run    print what would happen, change nothing
 #        ./install.sh --no-deps    skip the package-dependency check
 #        ./install.sh --deps-only  only resolve dependencies, install no tools
+#        ./install.sh --with-optional  also install the optional requirements
 #   sudo ./install.sh --no-mac-random   skip the Wi-Fi MAC randomization drop-in
 #   sudo ./install.sh --no-proton       skip installing the Proton VPN client
 #   sudo ./install.sh --no-endpoint     skip OpenSnitch, osquery and the persistence watch
@@ -57,7 +58,7 @@ DNS_SYS=(audit-dns.sh harden-dns.sh dns-toggle)
 DNS_USER=(checkdns dns-status.sh dns-tray)
 ECH_SYS=(panoptes-deps.sh ech-build.sh ech-browsers.sh)
 
-DRY=0; MODE=all; DEPS=1; MACRAND=1; PROTON=1; HELPERS=1; ENDPOINT=1
+DRY=0; MODE=all; DEPS=1; MACRAND=1; PROTON=1; HELPERS=1; ENDPOINT=1; WITH_OPT=0
 for a in "$@"; do
     case "$a" in
         --dry-run)   DRY=1 ;;
@@ -66,6 +67,7 @@ for a in "$@"; do
         --user)      MODE=user ;;
         --no-deps)   DEPS=0 ;;
         --deps-only) MODE=deps ;;
+        --with-optional) WITH_OPT=1 ;;
         --no-mac-random) MACRAND=0 ;;
         --no-proton) PROTON=0 ;;
         --no-endpoint) ENDPOINT=0 ;;
@@ -91,6 +93,7 @@ if [ "$DEPS" -eq 1 ] || [ "$MODE" = deps ]; then
     if [ -x "$SRC/panoptes-deps.sh" ]; then
         deps_args=()
         [ "$DRY" -eq 1 ] && deps_args+=(--dry-run)
+        [ "$WITH_OPT" -eq 1 ] && deps_args+=(--with-optional)
         case "$MODE" in
             dns)  deps_args+=(--group dns --group core) ;;
             ech)  deps_args+=(--group build --group dns) ;;

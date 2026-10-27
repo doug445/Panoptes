@@ -5,9 +5,29 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Found on the first real run of the endpoint component.
+## [3.1.1] — 2026-10-27
+
+The 3.1.0 installers meeting Fedora 44, plus the first real run of the
+endpoint component.
 
 ### Fixed
+
+- **`proton-setup.sh` refused to bootstrap on Fedora 44.** Proton signs each
+  Fedora release's repository with its *own* key, and the pinned fingerprint
+  was Fedora 43's, so the check correctly refused a legitimate key. The pin is
+  now per release (41–44, each read from `repo.protonvpn.com` over a verified
+  TLS chain and matched to its `Proton Technologies AG (Fedora NN)
+  <opensource@proton.me>` uid). An unlisted release **fails closed** and
+  prints the `gpg --show-keys` command to verify the new key by its uid,
+  rather than trusting whatever the repository happens to serve.
+- **`panoptes-deps.sh` tried to install `wireless-tools` on Fedora**, which
+  retired the package — `dnf5` answers `No match for argument`. `iwconfig` is
+  now `-` for Fedora: `iw` is already a core requirement, and every
+  `iwconfig` call in `wifi-recover.sh` is guarded by `have iwconfig`.
+- **`install.sh` advertised `--with-optional` but rejected it.**
+  `panoptes-deps.sh` names the flag in its own summary line, yet `install.sh`
+  neither accepted it — unknown options hit `exit 1` — nor forwarded it to
+  the bootstrapper. It now does both, and `--help` lists it.
 
 - **The persistence pack's `startup_items` query listed every systemd unit
   and mount** (728 rows on a laptop): osquery's Linux table folds those in
@@ -586,6 +606,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[3.1.1]: https://github.com/doug445/Panoptes/releases/tag/v3.1.1
 [2.5.0]: https://github.com/doug445/Panoptes/releases/tag/v2.5.0
 [2.4.1]: https://github.com/doug445/Panoptes/releases/tag/v2.4.1
 [2.4.0]: https://github.com/doug445/Panoptes/releases/tag/v2.4.0
