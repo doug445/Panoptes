@@ -24,7 +24,7 @@ with DNSSEC, Quad9 and Cloudflare behind it), Encrypted Client Hello in every
 browser that can do it, a Cloudflare WARP tunnel with a verified kill-switch
 and self-healing watchdog, Proton VPN as the fallback tunnel with WARP parked
 safely underneath it, a two-icon system-tray control for the resolver and the
-tunnels, monitors that watch firewalld drops and the ARP table for port scans
+tunnels, monitors that watch firewall drops (firewalld or ufw) and the ARP table for port scans
 and spoofed gateways, an outbound application firewall (OpenSnitch) and a
 persistence watch (osquery) that lists what runs at boot or login and tells
 you when that changes — plus deep investigation of any address that touches
@@ -304,7 +304,7 @@ action did not run instead of pretending it did.
 
 | Tool | What it does |
 |------|--------------|
-| **`netwatch`** | Watches **firewalld** dropped packets, new inbound connections and **ARP anomalies**, and raises desktop notifications. Fingerprints the gateway and alerts when its MAC changes on the *same* network; a new SSID or a new gateway address re-baselines instead of alarming. Runs as a systemd service; resolves D-Bus so `notify-send` works from a unit; survives the kernel journal going away. Never triggers a Wi-Fi scan. |
+| **`netwatch`** | Watches **firewalld** or **ufw** dropped packets, new inbound connections and **ARP anomalies**, and raises desktop notifications. Fingerprints the gateway and alerts when its MAC changes on the *same* network; a new SSID or a new gateway address re-baselines instead of alarming. Runs as a systemd service; resolves D-Bus so `notify-send` works from a unit; survives the kernel journal going away. Never triggers a Wi-Fi scan. |
 | **`probesource`** | **The centrepiece.** Investigate any address — a firewall drop, a probe, a live connection. Pass one in as `probesource <ip>`, or pick a target from the UFW journal, the `netwatch` log, the live `ss` table, or type one in. Then run a single tactic, a one-pass sweep, or a relentless escalating sweep. Passive tactics: `whois`, reverse DNS, GeoIP, journal and `netwatch` history, neighbour table and OUI lookup, live socket state, conntrack, ipset membership, short `tcpdump`/`tshark` capture, and a `p0f` fingerprint listener. The target is validated once, at entry, as a strict IPv4 or IPv6 literal before any tactic sees it. |
 | **`nettop`** | Lists hosts on the LAN and WAN with vendor attribution — active `arp-scan` for the LAN, falling back to `ip neigh` plus OUI lookup, with `whois` filling in vendor for public addresses. |
 | **`netcheck`** | Read-only network status readout: every interface, Wi-Fi SSID, band, channel, frequency, protocol and bitrate for each adapter, MAC randomization state, firewall state, listening ports with the owning process, WARP state with an exit check, live DNSSEC and DoT verification, and cached `whois` for public addresses (private ranges are skipped). |
@@ -317,7 +317,7 @@ x86_64 and aarch64 alike.
 
 | Tool | What it does |
 |------|--------------|
-| **OpenSnitch** (installed by `endpoint-setup.sh`) | An outbound **application firewall**, the LuLu role: every program's first connection to a new destination raises a prompt, and the rule you choose is kept. firewalld and the kill-switch only cover inbound and the tunnel; this is what covers *outbound*. From the distribution on the Debian, Ubuntu and Arch families; on Fedora and openSUSE, which package neither it nor its UI, from upstream's GitHub release, verified against the maintainer's **signed** `readme.txt` (pinned key, SHA-512 per package). `endpoint-setup.sh` seeds *allow* rules for the suite's own traffic — `systemd-resolved`, NetworkManager, `warp-svc`, and the kill-switch watchdog's raw-IP pings and portal checks, pinned to their destinations — so a rebuild is never left waiting on a dialog, and starts the prompt UI with your session. |
+| **OpenSnitch** (installed by `endpoint-setup.sh`) | An outbound **application firewall**, the LuLu role: every program's first connection to a new destination raises a prompt, and the rule you choose is kept. The host firewall and the kill-switch only cover inbound and the tunnel; this is what covers *outbound*. From the distribution on the Debian, Ubuntu and Arch families; on Fedora and openSUSE, which package neither it nor its UI, from upstream's GitHub release, verified against the maintainer's **signed** `readme.txt` (pinned key, SHA-512 per package). `endpoint-setup.sh` seeds *allow* rules for the suite's own traffic — `systemd-resolved`, NetworkManager, `warp-svc`, and the kill-switch watchdog's raw-IP pings and portal checks, pinned to their destinations — so a rebuild is never left waiting on a dialog, and starts the prompt UI with your session. |
 | **osquery** (installed by `endpoint-setup.sh`) | The operating system as SQL tables, from osquery's own repository with the signing key **pinned by fingerprint** (one key serves APT, dnf and zypper). The suite ships a **persistence pack**: systemd units outside the distribution's directories, cron, autostart items, kernel modules, `ld.so.preload`, SSH authorized keys, sudoers rules, setuid binaries, network-exposed listeners with the process behind each, processes whose binary was deleted, the hashes of the system and per-user shell, dispatcher and drop-in hook files, and accounts. Your own `osquery.conf` is never overwritten: the suite keeps a copy of what it wrote and leaves an edited file alone. |
 | **`persistcheck`** | The KnockKnock role, on demand: runs the pack's queries through `osqueryi` (via `sudo -n` when it can, so cron, keys and sudoers are complete) and prints everything, with `+`/`-` against the snapshot it took last time, so "what changed since I last looked" is one command. `--diff` for changes only, `--json` for the rows, `--baseline` to reset. Reads the installed pack, so it can never drift from what the watch watches. |
 | **`persistwatch`** | The BlockBlock role, live: a root service that follows `osqueryd`'s results log and raises a desktop notification to every graphical session when the pack reports a new row — a new unit, cron entry, autostart item, module, key, sudoers rule, listener, deleted-binary process or changed hook file. Keeps its place across restarts and rotation; collapses a burst (the first pass after install lists everything that already exists) into one summary instead of a hundred dialogs. |
@@ -528,7 +528,7 @@ tactic, it does not break the run.
 
 | Required | Optional (per tactic) |
 |---|---|
-| `bash` 4+, `systemd-resolved`, `iproute2`, NetworkManager, `python3` + PyGObject + GTK 3 (trays) | `arp-scan`, `whois`, `tcpdump`, `tshark`, `p0f`, `conntrack`, `ipset`, `dig` (bind-utils), `firewalld`, libxapp (XApp tray icons), PyQt6 (KDE trays), `warp-cli`, Proton VPN, OpenSnitch, osquery |
+| `bash` 4+, `systemd-resolved`, `iproute2`, NetworkManager, `python3` + PyGObject + GTK 3 (trays) | `arp-scan`, `whois`, `tcpdump`, `tshark`, `p0f`, `conntrack`, `ipset`, `dig` (bind-utils), `firewalld` (Fedora, openSUSE) or `ufw` (Debian, Ubuntu, Mint, Arch) — never both, libxapp (XApp tray icons), PyQt6 (KDE trays), `warp-cli`, Proton VPN, OpenSnitch, osquery |
 
 Four requirements come from outside the distribution. `warp-setup.sh` adds
 Cloudflare's repository and installs `warp-cli`; `proton-setup.sh` adds
@@ -782,7 +782,7 @@ changes to the system**. Everything that writes says so; `harden-dns.sh`,
   and setuid scans), not prevented. The first pass after install lists
   everything that already exists as one summary; run `persistcheck
   --baseline` then to take the snapshot you will diff against.
-- **`netwatch` needs a firewalld log target** to have anything to read.
+- **`netwatch` needs a firewall that logs drops** to have anything to read: firewalld with `--set-log-denied`, or ufw with `ufw logging on`.
 - **Lint is clean and enforced.** CI fails on any `shellcheck` warning across
   every bash tool, including the kill-switch root helper, and on the full
   default `ruff` ruleset for the Python trays. Where word splitting is
