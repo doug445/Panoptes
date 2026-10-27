@@ -36,6 +36,9 @@ body:
         - warp-tray
         - proton-setup.sh
         - proton-fallback
+        - endpoint-setup.sh
+        - persistcheck
+        - persistwatch
         - ech-build.sh
         - ech-browsers.sh
         - panoptes-deps.sh

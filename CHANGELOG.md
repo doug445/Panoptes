@@ -3,6 +3,47 @@
 All notable changes to Panoptes are recorded here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [3.1.0] — 2026-10-27
+
+### Added
+
+- **The endpoint component** — the Linux counterpart of Panoptes-macOS's
+  `objective-see` component (LuLu, KnockKnock, BlockBlock), on x86_64 and
+  aarch64 alike. `endpoint-setup.sh` installs **OpenSnitch**, the outbound
+  application firewall, from the distribution on the Debian, Ubuntu and Arch
+  families and, on Fedora and openSUSE, which package neither it nor its UI,
+  from upstream's GitHub release verified against the maintainer's signed
+  `readme.txt` (pinned key `F34016AC…`, SHA-512 per package); seeds *allow*
+  rules for the suite's own traffic (`systemd-resolved`, NetworkManager,
+  `warp-svc`, and the kill-switch watchdog's pings and portal checks pinned to
+  their destinations) so a rebuild never waits on a dialog; and starts the
+  prompt UI with the session where the package ships no autostart entry. It
+  installs **osquery** from osquery's own repository with the key pinned by
+  fingerprint (`1484120A…`; one key for APT, dnf and zypper), ships a
+  **persistence pack** (systemd units in admin paths, cron, autostart items,
+  kernel modules, `ld.so.preload`, SSH authorized keys, sudoers, setuid
+  binaries, exposed listeners with their process, deleted-binary processes,
+  hashes of shell/dispatcher/drop-in hook files, accounts), writes
+  `osquery.conf` only when none exists and keeps a copy so a hand-edited file
+  is left alone, and enables `osqueryd`. Idempotent; `--check`, `--dry-run`,
+  `--yes`, `--no-opensnitch`, `--no-osquery`, `--uninstall` (packages stay;
+  `--purge` removes them). A full `install.sh` runs it; `--no-endpoint`
+  leaves it out; `uninstall.sh` reverses it.
+- **`persistcheck`** (KnockKnock): runs the installed pack's queries through
+  `osqueryi` — via `sudo -n` when it can — and prints everything with `+`/`-`
+  against the snapshot from last time; `--diff`, `--json`, `--baseline`,
+  per-query selection. Exit 1 when something changed.
+- **`persistwatch`** (BlockBlock): a root service following `osqueryd`'s
+  results log, notifying every graphical session of a new pack row; keeps its
+  position across restarts and rotation; collapses bursts into one summary;
+  `--once`, `--test`, `--from-start`.
+- `panoptes-deps.sh` gains an `endpoint` group; the bug-report template lists
+  the new tools.
+
+### Changed
+
+- `install.sh` reports exactly which services it enabled.
+
 ## [3.0.0] — 2026-10-27
 
 A major version because the tunnel story changed in ways you will notice:

@@ -29,8 +29,9 @@ if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
 fi
 
 SYS_TOOLS=(netmaster probesource wifi-recover.sh audit-dns.sh harden-dns.sh warp-killswitch dns-toggle
-           panoptes-deps.sh ech-build.sh ech-browsers.sh warp-setup.sh proton-setup.sh)
-USER_TOOLS=(netcheck netwatch nettop checkdns dns-tray dns-status.sh warp-tray proton-fallback)
+           panoptes-deps.sh ech-build.sh ech-browsers.sh warp-setup.sh proton-setup.sh
+           endpoint-setup.sh persistwatch)
+USER_TOOLS=(netcheck netwatch nettop checkdns dns-tray dns-status.sh warp-tray proton-fallback persistcheck)
 
 DRY=0
 [ "${1:-}" = "--dry-run" ] && DRY=1
@@ -41,6 +42,11 @@ removed=0
 if [ -x "$SYS_DIR/warp-killswitch" ]; then
     if [ "$DRY" -eq 1 ]; then echo "  would run: warp-killswitch uninstall"
     else "$SYS_DIR/warp-killswitch" uninstall | sed 's/^/  /'; fi
+fi
+# The endpoint component's rules, pack, config and service (packages stay).
+if [ -x "$SYS_DIR/endpoint-setup.sh" ]; then
+    if [ "$DRY" -eq 1 ]; then echo "  would run: endpoint-setup.sh --uninstall --yes"
+    else "$SYS_DIR/endpoint-setup.sh" --uninstall --yes | sed 's/^/  /'; fi
 fi
 for f in /etc/sudoers.d/panoptes-dns-toggle /etc/sudoers.d/panoptes-warp-killswitch; do
     [ -e "$f" ] || continue

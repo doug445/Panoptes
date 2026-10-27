@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+#
+# Panoptes — the all-seeing network watch
+# https://github.com/doug445/Panoptes
+#
+# Copyright (c) 2026 William MacKinnon <spilled-bowline0j@icloud.com>
+# SPDX-License-Identifier: MIT
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+# persistwatch — the BlockBlock half of the endpoint component. Follows
+# osqueryd's results log and raises a desktop notification, to every graphical
+# session, when the Panoptes persistence pack reports a new row: a systemd unit
+# in an admin path, a cron entry, an autostart item, a kernel module, an
+# SSH key, a sudoers rule, a setuid binary, a changed ld.so.preload, a new
+# network listener, a process whose binary was deleted, a changed hook file, a
+# new account. Removed rows are logged, not announced.
+#
+# Runs as root (persistwatch.service, written by endpoint-setup.sh). Keeps its
+# place in the log across restarts, notices rotation, and collapses a burst
+# (osqueryd's first pass after the pack is installed reports everything that
+# already exists) into one summary notification instead of a hundred.
+#
+# Usage:
+#   persistwatch            follow the log forever (what the service runs)
+#   persistwatch --once     process whatever is new, then exit
+#   persistwatch --test     send a test notification and exit
+#   persistwatch --from-start   forget the saved position and re-read the whole log
+import json
+import os
+import subprocess
+import sys
+import time
+
+# Paths; the PERSISTWATCH_* variables exist so the parser can be exercised
+# against a synthetic log without touching the real ones.
+RESULTS = os.environ.get('PERSISTWATCH_RESULTS', '/var/log/osquery/osqueryd.results.log')
+STATE_DIR = os.environ.get('PERSISTWATCH_STATE_DIR', '/var/lib/persistwatch')
+STATE = os.path.join(STATE_DIR, 'position')
+LOG = os.environ.get('PERSISTWATCH_LOG', '/var/log/persistwatch.log')
+PREFIX = 'pack_panoptes-persistence_'
+POLL = 5            # seconds between reads
+BURST = 8           # more added rows than this in one batch -> one summary notification
+NOTIFY_TIMEOUT = 6
+
+QUIET = {'users_removed'}
+
+
+def log(msg):
+    line = f"[{time.strftime('%F %T')}] persistwatch: {msg}"
+    print(line, flush=True)
+    try:
+        with open(LOG, 'a') as fh:
+            fh.write(line + '\n')
+    except OSError:
+        pass
+
+
+def sessions():
+    """(uid, user) for every logged-in human user with a session bus."""
+    out = []
+    try:
+        res = subprocess.run(['loginctl', 'list-sessions', '--no-legend'],
+                             capture_output=True, text=True, check=False, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return out
+    seen = set()
+    for line in res.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        try:
+            uid = int(parts[1])
+        except ValueError:
+            continue
+        if uid < 1000 or uid in seen or not os.path.exists(f'/run/user/{uid}/bus'):
+            continue
+        seen.add(uid)
+        out.append((uid, parts[2]))
+    return out
+
+
+def notify(title, body, urgency='critical'):
+    log(f'NOTIFY {title}: {body}')
+    for uid, user in sessions():
+        env = {'DBUS_SESSION_BUS_ADDRESS': f'unix:path=/run/user/{uid}/bus',
+               'XDG_RUNTIME_DIR': f'/run/user/{uid}'}
+        cmd = ['runuser', '-u', user, '--', 'env'] + [f'{k}={v}' for k, v in env.items()] + [
+            'notify-send', '-a', 'Panoptes persistence', '-u', urgency, '-i', 'dialog-warning',
+            title, body]
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           check=False, timeout=NOTIFY_TIMEOUT)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+def describe(query, c):
+    """One line for a row of the given pack query. Unknown queries fall back to the columns."""
+    g = c.get
+    if query == 'systemd_units_admin':
+        return f"New systemd unit: {g('id')} ({g('fragment_path')}) {g('active_state')}/{g('sub_state')}"
+    if query == 'crontab':
+        return f"New cron entry in {g('path')}: {g('minute')} {g('hour')} {g('day_of_month')} {g('month')} {g('day_of_week')} {g('command')}"
+    if query == 'startup_items':
+        return f"New autostart item: {g('name')} -> {g('path')} {g('args') or ''} ({g('source')}, {g('username') or 'system'})"
+    if query == 'kernel_modules':
+        return f"Kernel module loaded: {g('name')} (used by: {g('used_by') or '-'})"
+    if query == 'authorized_keys':
+        return f"New SSH authorized key for {g('username')}: {g('algorithm')} {g('comment') or ''} in {g('key_file')}"
+    if query == 'sudoers':
+        return f"New sudoers rule in {g('source')}: {g('header')} {g('rule_details')}"
+    if query == 'suid_bin':
+        return f"New setuid/setgid binary: {g('path')} ({g('username')}:{g('groupname')} {g('permissions')})"
+    if query == 'listening_ports':
+        return f"New listener: {g('protocol')} {g('address')}:{g('port')} by {g('name')} ({g('path')})"
+    if query == 'deleted_binaries':
+        return f"Process running from a DELETED binary: {g('name')} pid {g('pid')} uid {g('uid')} ({g('path')})"
+    if query in ('hook_files', 'hook_dirs', 'user_hooks'):
+        return f"Hook file new or changed: {g('path')} (sha256 {str(g('sha256'))[:12]}…)"
+    if query == 'users':
+        return f"New account: {g('username')} uid {g('uid')} shell {g('shell')} home {g('directory')}"
+    return f"{query}: " + ' '.join(f'{k}={v}' for k, v in c.items())
+
+
+def load_position():
+    try:
+        with open(STATE) as fh:
+            ino, off = fh.read().split()
+            return int(ino), int(off)
+    except (OSError, ValueError):
+        return None, 0
+
+
+def save_position(ino, off):
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = STATE + '.tmp'
+        with open(tmp, 'w') as fh:
+            fh.write(f'{ino} {off}\n')
+        os.replace(tmp, STATE)
+    except OSError as e:
+        log(f'could not save position: {e}')
+
+
+def read_new(ino, off):
+    """Return (new_lines, ino, off), handling rotation and truncation."""
+    try:
+        st = os.stat(RESULTS)
+    except FileNotFoundError:
+        return [], ino, off
+    if ino is None:
+        # first ever start: begin at the end, so an existing log is not replayed
+        return [], st.st_ino, st.st_size
+    if st.st_ino != ino or st.st_size < off:
+        log('results log rotated or truncated — starting from its beginning')
+        ino, off = st.st_ino, 0
+    if st.st_size == off:
+        return [], ino, off
+    with open(RESULTS, 'rb') as fh:
+        fh.seek(off)
+        data = fh.read()
+    lines = data.split(b'\n')
+    # keep a trailing partial line for next time
+    if data and not data.endswith(b'\n'):
+        off += len(data) - len(lines[-1])
+        lines = lines[:-1]
+    else:
+        off += len(data)
+    return [ln for ln in lines if ln.strip()], ino, off
+
+
+def process(lines):
+    added, removed = [], []
+    for raw in lines:
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue
+        name = ev.get('name', '')
+        if not name.startswith(PREFIX):
+            continue
+        query = name[len(PREFIX):]
+        cols = ev.get('columns') or {}
+        if ev.get('action') == 'added':
+            added.append((query, cols))
+        elif ev.get('action') == 'removed':
+            removed.append((query, cols))
+    for query, cols in removed:
+        log(f'removed {query}: ' + ' '.join(f'{k}={v}' for k, v in cols.items()))
+    if not added:
+        return
+    if len(added) > BURST:
+        for query, cols in added:
+            log('added ' + describe(query, cols))
+        by = {}
+        for query, _ in added:
+            by[query] = by.get(query, 0) + 1
+        summary = ', '.join(f'{v} {k}' for k, v in sorted(by.items()))
+        notify(f'{len(added)} persistence rows appeared',
+               f'{summary}. A first pass after install lists what already exists; '
+               f'otherwise something just changed a lot. Run persistcheck.', 'normal')
+        return
+    for query, cols in added:
+        text = describe(query, cols)
+        log('added ' + text)
+        notify('Persistence change', text)
+
+
+def main(argv):
+    if '--test' in argv:
+        notify('Panoptes persistence', 'Test notification from persistwatch — delivery works.', 'normal')
+        return 0
+    if os.geteuid() != 0:
+        print('persistwatch reads /var/log/osquery as root; run it as root (or via persistwatch.service)',
+              file=sys.stderr)
+        return 1
+    ino, off = load_position()
+    if '--from-start' in argv:
+        ino, off = (os.stat(RESULTS).st_ino if os.path.exists(RESULTS) else None), 0
+    once = '--once' in argv
+    log(f'started (results={RESULTS}, poll={POLL}s, once={once})')
+    while True:
+        lines, ino, off = read_new(ino, off)
+        if lines:
+            process(lines)
+        save_position(ino, off)
+        if once:
+            return 0
+        time.sleep(POLL)
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)

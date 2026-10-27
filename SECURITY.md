@@ -66,7 +66,9 @@ programs. That is the interesting surface:
   on `up`.
 * **Anything that writes outside its documented paths**, or that a read-only
   tool writes at all. `audit-dns.sh`, `netcheck`, `nettop`, `checkdns`,
-  `dns-status.sh` and `wifi-recover.sh` without `--repair` must change nothing.
+  `dns-status.sh`, `persistcheck` (beyond its own snapshot under
+  `~/.local/state/panoptes`) and `wifi-recover.sh` without `--repair` must
+  change nothing.
 * **The installers fetching or trusting the wrong thing.** `panoptes-deps.sh`,
   `warp-setup.sh`, `ech-build.sh` and `ech-browsers.sh` all run as root and pull
   in software: a repository added without `gpgcheck`, an unverified tarball, a
@@ -110,6 +112,19 @@ programs. That is the interesting surface:
   park WARP (or refuse) before it connects; connecting with WARP's daemon
   running is the wedge the park exists to prevent. Likewise `warp-tray` must
   refuse `connect` and `up` while Proton VPN is connected.
+* **`endpoint-setup.sh` trusting the wrong thing, or the suite's OpenSnitch
+  rules being wider than stated.** osquery's key is pinned by fingerprint;
+  OpenSnitch on Fedora and openSUSE must verify the maintainer's signed
+  `readme.txt` and the per-package SHA-512 before the package manager sees a
+  file. The seeded rules are `allow` by exact process path, and for the two
+  general tools (`ping`, `curl`) pinned to the watchdog's destinations; a rule
+  that allows a general interpreter or any destination is a finding. So is
+  `endpoint-setup.sh` overwriting an `osquery.conf` or an OpenSnitch rule it
+  did not write.
+* **`persistwatch` running untrusted text.** Everything it reads comes from
+  osqueryd's results log — process names, cron commands, SSH key comments,
+  file paths chosen by whoever put them there. It must only ever pass those
+  as arguments to `notify-send`, never through a shell.
 * **The trays claiming an action happened.** `dns-tray` and `warp-tray` run
   their helpers with `sudo -n` and must report a refusal; a success
   notification for an action that did not run is a finding.

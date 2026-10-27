@@ -19,6 +19,7 @@
 #        ./install.sh --deps-only  only resolve dependencies, install no tools
 #   sudo ./install.sh --no-mac-random   skip the Wi-Fi MAC randomization drop-in
 #   sudo ./install.sh --no-proton       skip installing the Proton VPN client
+#   sudo ./install.sh --no-endpoint     skip OpenSnitch, osquery and the persistence watch
 #   sudo ./install.sh --no-helpers      skip the kill-switch service and sudoers rules
 #
 # Unless --no-deps is given, panoptes-deps.sh runs first: it identifies the
@@ -26,7 +27,10 @@
 # A full install then runs proton-setup.sh, which adds Proton's signed
 # repository and installs the Proton VPN app and CLI (the fallback tunnel
 # proton-fallback and warp-tray drive). It asks before touching the package
-# manager; --no-proton leaves it out.
+# manager; --no-proton leaves it out. It then runs endpoint-setup.sh, which
+# installs OpenSnitch (outbound application firewall) and osquery with the
+# persistence pack and watch — the Linux counterpart of the macOS suite's
+# objective-see component; --no-endpoint leaves it out.
 #
 # A full install also wires the privileged helpers the trays depend on: a
 # sudoers rule letting the invoking user run dns-toggle without a password, and,
@@ -46,13 +50,14 @@ ICON_DIR="${HOME}/.local/share/icons"
 NM_DIR=/etc/NetworkManager/conf.d
 
 SYS_TOOLS=(netmaster probesource wifi-recover.sh audit-dns.sh harden-dns.sh warp-killswitch dns-toggle
-           panoptes-deps.sh ech-build.sh ech-browsers.sh warp-setup.sh proton-setup.sh)
-USER_TOOLS=(netcheck netwatch nettop checkdns dns-tray dns-status.sh warp-tray proton-fallback)
+           panoptes-deps.sh ech-build.sh ech-browsers.sh warp-setup.sh proton-setup.sh
+           endpoint-setup.sh persistwatch)
+USER_TOOLS=(netcheck netwatch nettop checkdns dns-tray dns-status.sh warp-tray proton-fallback persistcheck)
 DNS_SYS=(audit-dns.sh harden-dns.sh dns-toggle)
 DNS_USER=(checkdns dns-status.sh dns-tray)
 ECH_SYS=(panoptes-deps.sh ech-build.sh ech-browsers.sh)
 
-DRY=0; MODE=all; DEPS=1; MACRAND=1; PROTON=1; HELPERS=1
+DRY=0; MODE=all; DEPS=1; MACRAND=1; PROTON=1; HELPERS=1; ENDPOINT=1
 for a in "$@"; do
     case "$a" in
         --dry-run)   DRY=1 ;;
@@ -63,6 +68,7 @@ for a in "$@"; do
         --deps-only) MODE=deps ;;
         --no-mac-random) MACRAND=0 ;;
         --no-proton) PROTON=0 ;;
+        --no-endpoint) ENDPOINT=0 ;;
         --no-helpers) HELPERS=0 ;;
         -h|--help)   sed -n '/^# Installs the Panoptes tools/,/^[^#]/p' "$0" \
                          | sed -e '/^[^#]/d' -e 's/^# \?//'; exit 0 ;;
@@ -245,6 +251,24 @@ if [ "$MODE" = all ] && [ "$PROTON" -eq 1 ] && [ "$DEPS" -eq 1 ]; then
     fi
 fi
 
+# ── Endpoint: OpenSnitch + osquery persistence pack + persistwatch ───────
+#
+# The Linux counterpart of the macOS suite's objective-see component. Same
+# consent model as the Proton step: asks before the package manager runs,
+# skipped with --no-deps. Runs after the tools are in place because it writes
+# a unit for /usr/local/bin/persistwatch.
+if [ "$MODE" = all ] && [ "$ENDPOINT" -eq 1 ] && [ "$DEPS" -eq 1 ]; then
+    echo ""
+    if [ -x "$SRC/endpoint-setup.sh" ]; then
+        endpoint_args=()
+        [ "$DRY" -eq 1 ] && endpoint_args+=(--dry-run)
+        "$SRC/endpoint-setup.sh" "${endpoint_args[@]+"${endpoint_args[@]}"}" || \
+            echo "  (endpoint component incomplete — persistcheck and persistwatch need osquery; see above)"
+    else
+        echo "endpoint-setup.sh not found in bin/; skipping the endpoint component" >&2
+    fi
+fi
+
 # ── Privileged helpers: sudoers for the trays, the kill-switch service ────
 if [ "$MODE" = all ] && [ "$HELPERS" -eq 1 ]; then
     echo ""
@@ -284,11 +308,11 @@ if [ "$MODE" = all ] && [ "$HELPERS" -eq 1 ]; then
 fi
 
 echo ""
-if [ "$MODE" = all ] && [ "$HELPERS" -eq 1 ] && command -v warp-cli >/dev/null 2>&1; then
-    echo "Done. The only service enabled is warp-watchdog (the WARP kill-switch monitor)."
-else
-    echo "Done. Nothing was enabled as a service."
-fi
+svc=""
+[ "$MODE" = all ] && [ "$HELPERS" -eq 1 ] && command -v warp-cli >/dev/null 2>&1 && svc="warp-watchdog"
+[ "$MODE" = all ] && [ "$ENDPOINT" -eq 1 ] && [ "$DEPS" -eq 1 ] && svc="${svc:+$svc, }opensnitch, osqueryd, persistwatch"
+if [ -n "$svc" ]; then echo "Done. Services enabled: $svc."
+else echo "Done. Nothing was enabled as a service."; fi
 echo "Start here:  checkdns   |   sudo audit-dns.sh   |   netcheck"
 # Under sudo $PATH is root's secure_path, which says nothing about the invoking
 # user's shell; only check when we are actually that user.
