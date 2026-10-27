@@ -28,7 +28,8 @@ tunnels, monitors that watch firewalld drops and the ARP table for port scans
 and spoofed gateways, an outbound application firewall (OpenSnitch) and a
 persistence watch (osquery) that lists what runs at boot or login and tells
 you when that changes — plus deep investigation of any address that touches
-the machine.** Twenty-three command-line tools. One installer sets it all up,
+the machine.** This is a a comprehensive Endpoint Detection and Response (EDR) 
+hardening framework for Linux. Twenty-three command-line tools. One installer sets it all up,
 including its dependencies, the Proton VPN client and the endpoint pair, on
 Fedora, Debian, Ubuntu, Mint, Arch and openSUSE, on x86_64 and aarch64.
 
