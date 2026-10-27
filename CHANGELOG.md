@@ -3,7 +3,72 @@
 All notable changes to Panoptes are recorded here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [3.0.0] — 2026-10-27
+
+A major version because the tunnel story changed in ways you will notice:
+Proton VPN is now a first-class fallback that **parks** WARP rather than
+sharing the machine with it, the trays work on every desktop and tell the
+truth about what they did, the kill-switch's service pieces finally ship in
+the repository, `install.sh` wires the privileged helpers, and a full audit
+found and fixed 47 defects — several of which changed the behaviour of
+`netmaster`, `ech-build.sh` and `warp-setup.sh` on the distributions the
+README has always listed.
+
+### Added
+
+- **Proton VPN as the fallback tunnel, with WARP parked.** `proton-fallback
+  on` parks the WARP stack first (`warp-killswitch park`: daemon stopped and
+  disabled, DNS untouched, watchdog standing by), connects Proton VPN, waits
+  for the tunnel and verifies it; `off` disconnects and rebuilds WARP if the
+  tool was the one that parked it. A WARP torn down by you is left down. It
+  drives whichever client is present — the official `protonvpn` CLI, a
+  NetworkManager profile, a wg-quick config, or the desktop app — and
+  `import` turns a WireGuard or OpenVPN file from account.proton.me into a
+  NetworkManager profile with autoconnect off and Proton's pushed resolver
+  stripped (`--keep-dns` keeps it). Configuration from the environment or
+  `~/.config/panoptes/proton.conf`. The same park-before-raise pattern, on the
+  same evidence, as Panoptes-macOS.
+- **`proton-setup.sh`** installs the official Proton VPN Linux client — the
+  desktop app, the official CLI and the AppIndicator pieces its tray icon
+  needs — from Proton's own repository with the signing key **pinned by
+  fingerprint**. On APT the bootstrap verifies the signed `InRelease`, the
+  `Packages` index and the release package hash before `dpkg` runs, then lets
+  Proton's own `protonvpn-stable-release` package own the sources file and
+  keyring; on Fedora it imports the pinned key and checks the release RPM's
+  signature; the Arch family goes through an AUR helper already present
+  (`paru`, `yay` or `pamac`, as the invoking user); anything with Flatpak gets
+  the Flathub build. Idempotent: every step reports *unchanged* when it is.
+  `--check`, `--dry-run`, `--yes`, `--no-tray`, `--no-cli`, `--flatpak`,
+  `--uninstall`. A full `install.sh` runs it, after asking; `--no-proton`
+  leaves it out.
+- **`warp-killswitch park` / `unpark`**, a `parked` marker beside the kill
+  marker, `state` printing `parked|killed|armed`, and `status` showing it.
+  `heal`, the watchdog and the sleep hooks stand by while parked exactly as
+  when killed; a deliberate `down` clears the park marker so the tray can tell
+  the two apart.
+- **`warp-killswitch install` / `uninstall`.** The watchdog unit, the
+  `warp-svc` ExecStopPost crash-purge drop-in, the system-sleep hook, the
+  NetworkManager guard that keeps the WARP tun unmanaged, the NetworkManager
+  connectivity-check disable, and a sudoers rule pinned to the nine
+  invocations `warp-tray` and `proton-fallback` make — all written
+  idempotently (byte-compared, `visudo -c`-checked) and all previously
+  present only on the maintainer's machines. `warp-setup.sh` runs it after a
+  WARP install; `install.sh` runs it on a full install when WARP is present.
+- **`install.sh` wires the privileged helpers**: a pinned sudoers rule for
+  `dns-toggle` for the invoking user, and the kill-switch service above.
+  `--no-helpers` leaves them out. `uninstall.sh` reverses both, and now
+  removes the tray icons too.
+- **`warp-tray` v4**: a Proton VPN section in the right-click menu (*Connect
+  (parks WARP first)* / *Disconnect → rebuild WARP*), two new icon states —
+  orange `W` for *parked but Proton VPN not connected*, a yellow circle with a
+  black `P` for *Proton VPN connected* — a left-click refused while Proton VPN
+  is up or WARP is parked/torn down (with a notification saying why), *Rebuild*
+  refused while Proton VPN is up, and *Status* including the Proton VPN state.
+- **`panoptes-deps.sh`**: a `proton` group pointing at `proton-setup.sh`;
+  `conntrack`, `ipset` and `p0f` for `probesource`; PyQt6 (optional) for the
+  KDE trays.
+- **Logo tagline** is now *Linux Secure Network*, matching the macOS sibling,
+  and is live text rather than outlines.
 
 ### Changed
 
@@ -12,10 +77,126 @@ This project follows [Semantic Versioning](https://semver.org/).
   then proves plain internet works. `up` waits for a verified tunnel and rolls
   back to a clean disconnected state if one never comes. New subcommands:
   `heal`, `watchdog`, `purge`, `status`, `verify`, and `sleep-pre`/`sleep-post`.
-  Every `warp-cli` call is time-bounded.
+  Every `warp-cli` call is time-bounded. A manual `heal` now posts a result
+  even when there was nothing to fix.
 - **netmaster** recognizes warp-killswitch v3: rung R4 delegates to
-  `warp-killswitch purge`, and `status` / `warp` report the watchdog.
-- **warp-tray** adds Heal now and Status, and reads both kill markers.
+  `warp-killswitch purge`, and `status` / `warp` report the watchdog and the
+  parked state. `warp off` keeps DNS (`down --keep-dns`); `portal` is the
+  command for the DNS downgrade.
+- **`ech-build.sh` links curl statically.** No shared `libcurl` is installed
+  any more, so nothing else on the machine can pick the development TLS stack
+  up through the loader (see Fixed). `--verify` checks for exactly that.
+- **`dns-tray` and `warp-tray`** no longer gate on desktop names. The GTK
+  branch uses `XApp.StatusIcon` whenever the binding imports (Cinnamon, MATE,
+  XFCE on Mint and relatives) and `Gtk.StatusIcon` otherwise, with a themed
+  icon when the SVGs are not installed yet. Both reach their helpers with
+  `sudo -n`, check the result, and notify on failure with the rule that is
+  missing.
+- **README** restructured to mirror Panoptes-macOS: tunnel section, tray icon
+  and menu tables, *Updating*, *What gets installed where*, *Docs*, *Code of
+  conduct*, and the audit report. The bug-report template lists every tool.
+- **CI** actions are pinned to commit SHAs.
+
+### Fixed
+
+Found by the 3.0.0 audit unless noted. Severity as the reviewers rated it.
+
+*netmaster*
+- `undo --dry-run` executed the undo journal and consumed it (high).
+- The undo journal replayed forwards, so `chattr +i` ran before the `cp` it
+  was meant to follow and the restore failed with EPERM (high); replayed in
+  reverse now.
+- `diagnose` flagged and `fix` deleted any bridge with no ports (virbr0,
+  docker0) or route-flushed an unplugged physical NIC that showed a
+  `linkdown` route (high); physical devices and bridges are skipped.
+- "killed AND immutable" was read as the EPERM deadlock, but `down --keep-dns`
+  (every watchdog heal, and now `park`) sets the kill marker without swapping
+  DNS, so a hardened `resolved.conf` lost its immutable flag and gained a
+  relock marker nothing consumed (high); decided on the DNS backup now.
+- `restore` never reverted portal mode's profile changes (stable MAC,
+  accept-DHCP-DNS) and, without the kill-switch, left DNS plaintext (high);
+  profile settings are recorded and restored, and a direct DNS restore path
+  exists.
+- Output was block-buffered through `sed`, so prompts could sit unseen while
+  the tool waited on them (high); line-buffered.
+- `panic` dropped the immutable flag without a relock marker, so `restore`
+  never put it back (medium-high).
+- A `grep -q` under `pipefail` let `ip -6 rule show` die of SIGPIPE and skip
+  rung R4 (medium).
+- Profile names and SSIDs with spaces broke three detectors and three repairs
+  (medium); newline-separated lists.
+- `portal` matched the Wi-Fi profile by SSID, which `wl` cards do not report
+  (medium); matched by device.
+- `panic` hard-coded the `FedoraWorkstation` zone and produced `--zone='no
+  zone'` in its undo line (medium); probed, with `home` as the fallback.
+- `restore` left `connection.zone` persisted on NM-managed interfaces
+  (medium).
+- The ladder restarted NetworkManager and reloaded `brcmfmac` for a
+  resolver-only failure, on machines without `brcmfmac` (medium).
+- `portal` without the kill-switch left DNS-over-TLS on, so the portal stayed
+  invisible (medium).
+- Colours were computed after stdout became a pipe, so they were always off;
+  the watchdog status line printed `inactive` twice (low).
+
+*Tunnel and resolver tools*
+- WARP never reconnected after resume: the sleep hook backgrounded the
+  reconnect and systemd kills a sleep hook's children when it returns (high);
+  delegated to a transient unit.
+- `warp-setup.sh` wrote Cloudflare's APT line with the derivative's codename
+  (`zena`, `faye`), so the install failed on Mint, Pop!_OS and LMDE (high);
+  the base codename is used.
+- `warp-setup.sh` registered before `warp-svc` had opened its socket, so a
+  fresh install routinely died with "registration failed" (medium); it waits.
+- No `warp-cli` call in `warp-setup.sh` was time-bounded (medium); all are.
+- `dns-tray` and `warp-tray` announced success before `sudo` had answered,
+  with no `-n` and stderr discarded (medium).
+- A left-click on `warp-tray` ran `warp-cli connect` against a stopped,
+  disabled daemon and said "Connected" (medium).
+- The kill-switch's state directory was created with sudo's umask (0750), so
+  the tray running as the user could never see the `killed` marker — a torn
+  down WARP looked merely "off" unless DNS had been swapped — and would not
+  have seen the new `parked` marker either (found while verifying the park
+  path on a live tunnel). The directory is 0755 and the markers 0644 now.
+- `harden-dns.sh` left `resolved.conf` writable if anything failed, or Ctrl-C
+  landed, between unlock and relock (high); relocked on every exit path.
+- `dns-tray` and `warp-tray` exited on MATE — and on any desktop other than
+  KDE, Cinnamon or (for `warp-tray`) XFCE — with `Unsupported desktop
+  environment`, after forking, so an autostart entry silently produced no icon
+  (found before the audit).
+
+*Monitoring and investigation*
+- `netwatch` raised a false "ARP spoofing" alert on every network change,
+  comparing the new gateway against the old network's MAC before noticing the
+  SSID had changed, and never compared the gateway address (high).
+- `netwatch` spun at 100% CPU if `journalctl` exited (medium); re-opens it.
+- `netwatch` triggered a real Wi-Fi scan every ~30 s for the life of the
+  daemon (medium); `--rescan no`.
+- `netcheck` flushed the resolver cache on every run while documented as
+  read-only (high); the flush is gone.
+- `netcheck` never showed which process owned a listening port (medium).
+- `probesource`'s single-host ARP tactic passed the target to `--destaddr`,
+  which is a MAC (medium); the host is a positional target on the routing
+  interface.
+
+*ECH, Wi-Fi, dependencies, install*
+- `ech-build.sh` installed a shared `libcurl` into `/usr/local/lib`, which the
+  Debian family's loader searches first, so git, cmake and pycurl silently
+  loaded the minimal ECH build (high); static now.
+- `ech-browsers.sh --no-doh` still switched Chromium's resolver to secure DoH
+  (high), and `--revert` restored a default rather than the user's previous
+  mode and template (medium); the previous values are stashed and restored.
+- `panoptes-deps.sh` never found GTK or XApp typelibs on the Debian family
+  (multiarch path), so every Mint/Ubuntu install exited 1 after "installing"
+  them (high). openSUSE package names for GTK 3 fixed; `libtool-bin` on
+  Debian.
+- `wifi-recover.sh` wrote logs and a tarball into `/usr/local/bin/logs` on
+  every run (high); `--bundle` was a no-op because the condition was always
+  true (high); "most recent connection" sorted a human-readable timestamp and
+  picked an arbitrary profile (high); `--reload-modules` could load `wl` over
+  a `b43` card (medium).
+- A `--dns-only` install shipped `dns-tray` without its icons (high);
+  `uninstall.sh` left the icons behind (medium); the PATH note fired on every
+  sudo install (low).
 
 ## [2.5.0] — 2026-08-24
 

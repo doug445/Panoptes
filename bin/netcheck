@@ -72,7 +72,7 @@ echo -e "  Open ports:    ${ports:-${GREEN}none${NC}}"
 
 # Listening ports
 section "LISTENING PORTS"
-ss -tlnp 2>/dev/null | tail -n +2 | while read -r _ _ _ local _ _ process; do
+ss -tlnp 2>/dev/null | tail -n +2 | while read -r _ _ _ local _ process; do
     addr="${local%:*}"
     port="${local##*:}"
     if [[ "$addr" == "127.0.0.1" ]] || [[ "$addr" == "[::1]" ]] || [[ "$addr" == "127.0.0.53%lo" ]] || [[ "$addr" == "127.0.0.54" ]]; then
@@ -150,8 +150,8 @@ fi
 # Force a fresh upstream lookup, then look for an established TCP :853 socket
 # owned by systemd-resolve (proves the wire is actually TLS, not :53 plaintext).
 if command -v ss &>/dev/null; then
-    resolvectl flush-caches 2>/dev/null || true
-    # Two unlikely-cached queries to provoke a real upstream round-trip.
+    # No cache flush: netcheck is read-only, and the random name below cannot
+    # be cached anyway, so it forces a real upstream round-trip on its own.
     dig +time=2 +tries=1 @127.0.0.53 "rand-${RANDOM}-$(date +%s).example.org" >/dev/null 2>&1 || true
     dig +time=2 +tries=1 @127.0.0.53 cloudflare.com                          >/dev/null 2>&1 || true
     sleep 0.4

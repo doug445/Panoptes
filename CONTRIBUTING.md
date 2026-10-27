@@ -18,9 +18,14 @@ Use a VM, a spare box, or a machine you can walk over to and fix from a console.
 Know which half of the suite you are in:
 
 - **Read-only, safe anywhere:** `audit-dns.sh`, `checkdns`, `dns-status.sh`,
-  `netcheck`, `nettop`, `probesource`, and `wifi-recover.sh` without `--repair`.
-- **Writes:** `harden-dns.sh`, `dns-toggle`, `warp-killswitch`, `netmaster`, and
-  `wifi-recover.sh --repair`.
+  `netcheck`, `nettop`, `probesource` (passive tactics), `proton-fallback
+  status`/`state`, `panoptes-deps.sh --check`, `proton-setup.sh --check`,
+  `warp-setup.sh --check`, and `wifi-recover.sh` without `--repair`.
+- **Writes:** `harden-dns.sh`, `dns-toggle`, `warp-killswitch`, `netmaster`,
+  `ech-build.sh`, `ech-browsers.sh`, `warp-setup.sh`, `proton-setup.sh`,
+  `proton-fallback on`/`off`/`import`, `panoptes-deps.sh` (as root), the trays
+  (through their helpers), `install.sh`, and `wifi-recover.sh --repair`. All of
+  them take `--dry-run` except the trays and `dns-toggle`.
 
 `harden-dns.sh --dry-run` prints the whole plan and changes nothing. Use it
 before the real run, every time.

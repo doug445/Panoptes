@@ -40,7 +40,7 @@
 #        ./panoptes-deps.sh --list         show the full requirement table
 #        ./panoptes-deps.sh --dry-run      resolve and report, run no package manager
 #
-# Groups: core dns firewall investigate tray build warp
+# Groups: core dns firewall investigate tray build warp proton
 # Optional requirements are skipped unless --with-optional is given.
 
 set -uo pipefail
@@ -55,7 +55,10 @@ usage() { sed -n '/^# panoptes-deps\.sh —/,/^[^#]/p' "$0" | sed -e '/^[^#]/d' 
 # probe:  cmd:NAME       the command must be in PATH
 #         pc:NAME        pkg-config must resolve NAME (development headers)
 #         py:MODULE      python3 must import MODULE
-#         file:PATH      PATH must exist
+#         file:PATH      PATH must exist (lib/lib64/multiarch variants are tried)
+#
+# pyqt6 is optional because only the KDE branch of dns-tray/warp-tray imports it;
+# pass --with-optional on a Plasma desktop.
 #
 # "-" means the distribution does not package it under any name we know.
 #
@@ -86,10 +89,14 @@ traceroute|cmd:traceroute|investigate|no|traceroute|traceroute|traceroute|tracer
 dialog|cmd:dialog|investigate|no|dialog|dialog|dialog|dialog|dialog
 whiptail|cmd:whiptail|investigate|yes|newt|whiptail|libnewt|newt|newt
 geoiplookup|cmd:geoiplookup|investigate|yes|-|geoip-bin|-|-|-
+conntrack|cmd:conntrack|investigate|no|conntrack-tools|conntrack|conntrack-tools|conntrack-tools|conntrack-tools
+ipset|cmd:ipset|investigate|no|ipset|ipset|ipset|ipset|ipset
+p0f|cmd:p0f|investigate|yes|p0f|p0f|-|-|-
 python3|cmd:python3|tray|no|python3|python3|python|python3|python3
 pygobject|py:gi|tray|no|python3-gobject|python3-gi|python-gobject|python3-gobject|py3-gobject3
-gtk3|file:/usr/lib64/girepository-1.0/Gtk-3.0.typelib|tray|no|gtk3|gir1.2-gtk-3.0|gtk3|gtk3|gtk+3.0
-xapp|file:/usr/lib64/girepository-1.0/XApp-1.0.typelib|tray|yes|xapps|gir1.2-xapp-1.0|xapp|-|-
+gtk3|file:/usr/lib64/girepository-1.0/Gtk-3.0.typelib|tray|no|gtk3|gir1.2-gtk-3.0|gtk3|typelib-1_0-Gtk-3_0|gtk+3.0
+xapp|file:/usr/lib64/girepository-1.0/XApp-1.0.typelib|tray|yes|xapps|gir1.2-xapp-1.0|xapp|typelib-1_0-XApp-1_0|-
+pyqt6|py:PyQt6.QtWidgets|tray|yes|python3-pyqt6|python3-pyqt6|python-pyqt6|python3-qt6|py3-pyqt6
 notify-send|cmd:notify-send|tray|no|libnotify|libnotify-bin|libnotify|libnotify-tools|libnotify
 git|cmd:git|build|no|git|git|git|git|git
 gcc|cmd:gcc|build|no|gcc|build-essential|base-devel|gcc|build-base
@@ -97,17 +104,19 @@ make|cmd:make|build|no|make|make|make|make|make
 perl|cmd:perl|build|no|perl-core|perl|perl|perl|perl
 autoconf|cmd:autoconf|build|no|autoconf|autoconf|autoconf|autoconf|autoconf
 automake|cmd:automake|build|no|automake|automake|automake|automake|automake
-libtool|cmd:libtool|build|no|libtool|libtool|libtool|libtool|libtool
+libtool|cmd:libtool|build|no|libtool|libtool-bin|libtool|libtool|libtool
 pkg-config|cmd:pkg-config|build|no|pkgconf-pkg-config|pkg-config|pkgconf|pkg-config|pkgconf
 zlib-dev|pc:zlib|build|no|zlib-devel|zlib1g-dev|zlib|zlib-devel|zlib-dev
 nghttp2-dev|pc:libnghttp2|build|no|libnghttp2-devel|libnghttp2-dev|libnghttp2|libnghttp2-devel|nghttp2-dev
 idn2-dev|pc:libidn2|build|no|libidn2-devel|libidn2-dev|libidn2|libidn2-devel|libidn2-dev
 psl-dev|pc:libpsl|build|no|libpsl-devel|libpsl-dev|libpsl|libpsl-devel|libpsl-dev
 warp-cli|cmd:warp-cli|warp|yes|-|-|-|-|-
+protonvpn-app|cmd:protonvpn-app|proton|yes|-|-|-|-|-
+protonvpn-cli|cmd:protonvpn|proton|yes|-|-|-|-|-
 TABLE
 )
 
-ALL_GROUPS="core dns firewall investigate tray build warp"
+ALL_GROUPS="core dns firewall investigate tray build warp proton"
 
 # ------------------------------------------------------------------- arguments
 CHECK_ONLY=0; ASSUME_YES=0; DRY=0; PRINT_ONLY=0; LIST=0; WITH_OPTIONAL=0
@@ -201,9 +210,14 @@ have() {  # $1 = probe spec
         cmd:*)  command -v "${1#cmd:}" >/dev/null 2>&1 ;;
         pc:*)   command -v pkg-config >/dev/null 2>&1 && pkg-config --exists "${1#pc:}" ;;
         py:*)   command -v python3 >/dev/null 2>&1 && python3 -c "import ${1#py:}" >/dev/null 2>&1 ;;
-        file:*) f=${1#file:}
-                # 64-bit distros disagree on lib vs lib64; accept either.
-                [ -e "$f" ] || [ -e "${f/lib64/lib}" ] || [ -e "${f/\/lib\//\/lib64\/}" ] ;;
+        file:*) f=${1#file:}; b=${f##*/}
+                # 64-bit distros disagree on lib vs lib64, and Debian multiarch
+                # keeps typelibs under /usr/lib/<triplet>/; accept any of them.
+                for c in "$f" "${f/lib64/lib}" "${f/\/lib\//\/lib64\/}" \
+                         /usr/lib/*/girepository-1.0/"$b" /usr/lib64/girepository-1.0/"$b"; do
+                    [ -e "$c" ] && return 0
+                done
+                return 1 ;;
         *) return 1 ;;
     esac
 }
@@ -240,6 +254,9 @@ while IFS='|' read -r id probe group opt fed deb arc sus alp; do
         case "$id" in
             warp-cli)
                 printf '  %s!%s %-14s %sno distro packages WARP — run: warp-setup.sh%s\n' \
+                    "$Y" "$N" "$id" "$Y" "$N" ;;
+            protonvpn-app|protonvpn-cli)
+                printf '  %s!%s %-14s %sno distro packages Proton VPN — run: proton-setup.sh%s\n' \
                     "$Y" "$N" "$id" "$Y" "$N" ;;
             *)
                 printf '  %s!%s %-14s %snot packaged for %s — install it yourself%s\n' \

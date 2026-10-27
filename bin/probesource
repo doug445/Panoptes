@@ -325,8 +325,13 @@ t_nmap_banner() {
 }
 t_arpscan() {
     if is_lan "$1"; then
+        # --destaddr sets the Ethernet destination MAC, not the target; the
+        # host goes on the command line, on the interface that routes to it.
+        local iface
+        iface=$(ip -o route get "$1" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
+        # shellcheck disable=SC2086
         log_section "ARP-SCAN (single host)" \
-            sudo -n arp-scan --localnet --destaddr="$1" --retry=3
+            sudo -n arp-scan ${iface:+-I "$iface"} --retry=3 "$1"
     else
         log_section "ARP-SCAN (skipped — not LAN)" echo "$1 routes via gateway"
     fi

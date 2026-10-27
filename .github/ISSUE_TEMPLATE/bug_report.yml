@@ -32,7 +32,13 @@ body:
         - netmaster
         - wifi-recover.sh
         - warp-killswitch
+        - warp-setup.sh
         - warp-tray
+        - proton-setup.sh
+        - proton-fallback
+        - ech-build.sh
+        - ech-browsers.sh
+        - panoptes-deps.sh
         - install.sh / uninstall.sh
         - more than one, or not sure
     validations:

@@ -7,9 +7,10 @@
 # SPDX-License-Identifier: MIT
 #
 # Removes the tools install.sh placed, and the MAC randomization drop-in if it
-# is still the one we shipped. Touches nothing else: no resolver settings are
-# reverted, no services are disabled. If you ran harden-dns.sh or
-# warp-killswitch, undo those with their own commands first.
+# is still the one we shipped, the kill-switch service pieces (via
+# `warp-killswitch uninstall`) and the tray sudoers rules. Touches nothing
+# else: no resolver settings are reverted. If you ran harden-dns.sh or
+# warp-killswitch down, undo those with their own commands first.
 #
 # Usage:
 #   sudo ./uninstall.sh [--dry-run]
@@ -21,17 +22,32 @@ NM_SRC="$ROOT/share/nm/mac-randomization.conf"
 NM_CONF=/etc/NetworkManager/conf.d/mac-randomization.conf
 SYS_DIR=/usr/local/bin
 USER_DIR="${HOME}/.local/bin"
-[ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && \
+ICON_DIR="${HOME}/.local/share/icons"
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
     USER_DIR="$(getent passwd "$SUDO_USER" | cut -d: -f6)/.local/bin"
+    ICON_DIR="$(getent passwd "$SUDO_USER" | cut -d: -f6)/.local/share/icons"
+fi
 
 SYS_TOOLS=(netmaster probesource wifi-recover.sh audit-dns.sh harden-dns.sh warp-killswitch dns-toggle
-           panoptes-deps.sh ech-build.sh ech-browsers.sh warp-setup.sh)
-USER_TOOLS=(netcheck netwatch nettop checkdns dns-tray dns-status.sh warp-tray)
+           panoptes-deps.sh ech-build.sh ech-browsers.sh warp-setup.sh proton-setup.sh)
+USER_TOOLS=(netcheck netwatch nettop checkdns dns-tray dns-status.sh warp-tray proton-fallback)
 
 DRY=0
 [ "${1:-}" = "--dry-run" ] && DRY=1
 
 removed=0
+# The kill-switch service pieces first, while the helper that knows them is
+# still installed; then the sudoers rules install.sh wrote.
+if [ -x "$SYS_DIR/warp-killswitch" ]; then
+    if [ "$DRY" -eq 1 ]; then echo "  would run: warp-killswitch uninstall"
+    else "$SYS_DIR/warp-killswitch" uninstall | sed 's/^/  /'; fi
+fi
+for f in /etc/sudoers.d/panoptes-dns-toggle /etc/sudoers.d/panoptes-warp-killswitch; do
+    [ -e "$f" ] || continue
+    if [ "$DRY" -eq 1 ]; then echo "  would remove $f"
+    else rm -f "$f"; echo "  removed $f"; fi
+    removed=$((removed + 1))
+done
 for f in "${SYS_TOOLS[@]}"; do
     [ -e "$SYS_DIR/$f" ] || continue
     if [ "$DRY" -eq 1 ]; then echo "  would remove $SYS_DIR/$f"
@@ -42,6 +58,15 @@ for f in "${USER_TOOLS[@]}"; do
     [ -e "$USER_DIR/$f" ] || continue
     if [ "$DRY" -eq 1 ]; then echo "  would remove $USER_DIR/$f"
     else rm -f "$USER_DIR/$f"; echo "  removed $USER_DIR/$f"; fi
+    removed=$((removed + 1))
+done
+# The tray icons install.sh copied from share/icons; only the files we ship.
+for src in "$ROOT"/share/icons/*.svg; do
+    [ -f "$src" ] || continue
+    f="$ICON_DIR/$(basename "$src")"
+    [ -e "$f" ] || continue
+    if [ "$DRY" -eq 1 ]; then echo "  would remove $f"
+    else rm -f "$f"; echo "  removed $f"; fi
     removed=$((removed + 1))
 done
 

@@ -33,7 +33,9 @@
 #   sudo bash wifi-recover.sh --bundle       # tar logs into a single file you can carry away
 #   sudo bash wifi-recover.sh --help
 #
-# Logs land on the USB drive this script is run from if writable, else /tmp/wifi-recover-logs/.
+# Logs land on the USB drive this script is run from if writable, else /tmp/wifi-recover-logs/
+# (always /tmp when the script is installed under /usr, /opt, /bin or /sbin).
+# The bundle tarball is only written with --bundle.
 # Saved connection PSKs are scrubbed from logs.
 
 set -u
@@ -66,12 +68,18 @@ fi
 
 # -------- pick log dir (USB next to script preferred) -------------------
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -w "$SCRIPT_DIR" ]] && touch "$SCRIPT_DIR/.wr.write-test" 2>/dev/null; then
-  rm -f "$SCRIPT_DIR/.wr.write-test"
-  LOG_DIR="$SCRIPT_DIR/logs"
-else
-  LOG_DIR="/tmp/wifi-recover-logs"
-fi
+case "$SCRIPT_DIR" in
+  # Installed system-wide (root can write there, but logs do not belong in bin).
+  /usr/*|/bin|/sbin|/opt/*)
+    LOG_DIR="/tmp/wifi-recover-logs" ;;
+  *)
+    if [[ -w "$SCRIPT_DIR" ]] && touch "$SCRIPT_DIR/.wr.write-test" 2>/dev/null; then
+      rm -f "$SCRIPT_DIR/.wr.write-test"
+      LOG_DIR="$SCRIPT_DIR/logs"
+    else
+      LOG_DIR="/tmp/wifi-recover-logs"
+    fi ;;
+esac
 mkdir -p "$LOG_DIR"
 chmod 0755 "$LOG_DIR" 2>/dev/null || true
 
@@ -377,18 +385,22 @@ if [[ $DO_REPAIR -eq 1 ]]; then
     section "[F] reload Broadcom driver modules (RISKY — only because --reload-modules was passed)"
     # Note: on Mid-2012 MBP with 'broadcom-sta' DKMS, the driver is 'wl'.
     # Don't unload cfg80211 — it's used by other things.
+    UNLOADED=()
     for m in wl brcmsmac b43; do
       if lsmod | awk '{print $1}' | grep -qx "$m"; then
-        run modprobe -r "$m" || true
+        run modprobe -r "$m" && UNLOADED+=("$m")
       fi
     done
     sleep 2
-    # Reload first one that exists
-    for m in wl brcmsmac b43; do
-      if modinfo "$m" >/dev/null 2>&1; then
-        run modprobe "$m" && break
-      fi
-    done
+    # Reload exactly what was unloaded — never "the first module modinfo knows",
+    # which would let wl claim a card that was running on b43/brcmsmac.
+    if [[ ${#UNLOADED[@]} -eq 0 ]]; then
+      note "no Broadcom module was loaded; nothing to reload"
+    else
+      for m in "${UNLOADED[@]}"; do
+        run modprobe "$m" || true
+      done
+    fi
     sleep 3
   fi
 
@@ -408,9 +420,11 @@ if [[ $DO_REPAIR -eq 1 ]]; then
     run nmcli device wifi rescan 2>/dev/null || true
     sleep 4
     run nmcli -f IN-USE,SSID,BSSID,SIGNAL,SECURITY device wifi list
-    LAST_CONN=$(nmcli -t -f NAME,TYPE,TIMESTAMP-REAL connection show 2>/dev/null \
+    # TIMESTAMP (epoch seconds) sorts numerically; TIMESTAMP-REAL is a human
+    # string with escaped colons that sort -n reads as 0 for every row.
+    LAST_CONN=$(nmcli -t -f NAME,TYPE,TIMESTAMP connection show 2>/dev/null \
       | awk -F: '$2=="802-11-wireless"||$2=="wifi"{print $3":"$1}' \
-      | sort -t: -k1 -nr | head -1 | cut -d: -f2-)
+      | sort -t: -k1,1nr | head -1 | cut -d: -f2-)
     if [[ -n "$LAST_CONN" ]]; then
       note "attempting connection: $LAST_CONN"
       run nmcli connection up "$LAST_CONN" || true
@@ -445,7 +459,7 @@ fi
 # =========================================================================
 # BUNDLE
 # =========================================================================
-if [[ $DO_BUNDLE -eq 1 || $DO_REPAIR -eq 1 || 1 -eq 1 ]]; then
+if [[ $DO_BUNDLE -eq 1 ]]; then
   banner "BUNDLE"
   TAR="$LOG_DIR/wifi-recover-bundle-$STAMP.tar.gz"
   # Snapshot a few relevant configs into a tmpdir, then tar with the log.

@@ -44,6 +44,8 @@
 #        ./ech-browsers.sh --dry-run    show every change, write nothing
 #        ./ech-browsers.sh --revert     undo everything this script set
 #        ./ech-browsers.sh --no-doh     ECH prefs only, leave the resolver alone
+#                                       (Firefox family only; Chromium has no
+#                                       separate ECH switch and is left as is)
 #        ./ech-browsers.sh --doh-url URL --bootstrap IP
 #
 # Tor Browser and Mullvad Browser are never touched. They resolve names through
@@ -358,6 +360,12 @@ gecko_state() {  # report what is set now
 # -------------------------------------------------------------------- chromium
 chromium_edit() {  # $1 = root, $2 = "apply"|"revert"
     local root=$1 action=$2 ls="$1/Local State"
+    if [ "$action" = apply ] && [ "$NO_DOH" -eq 1 ]; then
+        # Chromium has no ECH pref of its own: ECH rides on secure DNS, which
+        # --no-doh says not to touch. There is nothing to do here.
+        info "--no-doh: Chromium has no separate ECH switch — left unchanged"
+        return 0
+    fi
     if chromium_running "$root"; then
         bad "running — Chromium rewrites Local State on exit and would undo this"
         info "close it completely (check the tray) and run this again"
@@ -368,14 +376,21 @@ chromium_edit() {  # $1 = root, $2 = "apply"|"revert"
         return 1
     fi
     if [ ! -f "$ls" ]; then
+        [ "$action" = revert ] && { info "no Local State — nothing to revert"; return 0; }
         # Seeding before first launch is legitimate and works.
         [ "$DRY" -eq 1 ] && { info "would create $ls with secure DNS pre-seeded"; return 0; }
-        [ "$action" = revert ] && { info "no Local State"; return 0; }
         mkdir -p -- "$root" || return 1
         printf '{}' >"$ls" || return 1
         info "no Local State yet — seeding it for first launch"
     fi
-    [ "$DRY" -eq 1 ] && { info "would set dns_over_https.mode=$( [ "$action" = revert ] && echo automatic || echo secure )"; return 0; }
+    if [ "$DRY" -eq 1 ]; then
+        if [ "$action" = revert ]; then
+            info "would restore dns_over_https.mode/templates from the values stashed at apply"
+        else
+            info "would set dns_over_https.mode=secure (stashing the current values for --revert)"
+        fi
+        return 0
+    fi
     backup "$ls"
     PANOPTES_LS="$ls" PANOPTES_ACTION="$action" PANOPTES_TPL="$CHROME_DOH_URL" \
     python3 - <<'PY'
@@ -393,10 +408,27 @@ if not isinstance(state, dict):
     print("    Local State is not a JSON object", file=sys.stderr)
     sys.exit(1)
 doh = state.setdefault("dns_over_https", {})
+if not isinstance(doh, dict):
+    doh = state["dns_over_https"] = {}
+# The pre-Panoptes values live beside the setting so --revert can put back
+# exactly what was there (a stashed None means the key did not exist).
+STASH = "panoptes_ech_prev"
 if action == "revert":
-    doh["mode"] = "automatic"
-    doh["templates"] = ""
+    prev = state.pop(STASH, None)
+    if isinstance(prev, dict):
+        for key in ("mode", "templates"):
+            if prev.get(key) is None:
+                doh.pop(key, None)
+            else:
+                doh[key] = prev[key]
+    else:
+        doh.pop("mode", None)
+        doh.pop("templates", None)
+    if not doh:
+        state.pop("dns_over_https", None)
 else:
+    if STASH not in state:
+        state[STASH] = {"mode": doh.get("mode"), "templates": doh.get("templates")}
     doh["mode"] = "secure"
     doh["templates"] = tpl
 # Write through a temporary file in the same directory so a crash mid-write
@@ -410,11 +442,11 @@ try:
 except Exception:
     os.unlink(tmp)
     raise
-print(f"    mode={doh['mode']} templates={doh['templates'] or '(none)'}")
+print(f"    mode={doh.get('mode') or '(browser default)'} templates={doh.get('templates') or '(none)'}")
 PY
     local rc=$?
     if [ $rc -eq 0 ]; then
-        if [ "$action" = revert ]; then ok "secure DNS reverted to automatic"
+        if [ "$action" = revert ]; then ok "secure DNS restored to its pre-Panoptes setting"
         else ok "secure DNS set — ECH is on by default in Chromium 117 and later"; fi
     else
         bad "Local State not modified"
@@ -512,10 +544,14 @@ else
         printf '  %s--no-doh: TRR left alone. Firefox does not use ECH with TRR off,%s\n' "$Y" "$N"
         printf '  %sso this will not actually turn ECH on there.%s\n' "$Y" "$N"
     fi
-    echo "  Chromium family — Local State:"
-    echo "      dns_over_https.mode                 secure"
-    echo "      dns_over_https.templates            $CHROME_DOH_URL"
-    echo "      (ECH itself needs no flag from Chromium 117 on)"
+    if [ "$NO_DOH" -eq 0 ]; then
+        echo "  Chromium family — Local State:"
+        echo "      dns_over_https.mode                 secure"
+        echo "      dns_over_https.templates            $CHROME_DOH_URL"
+        echo "      (ECH itself needs no flag from Chromium 117 on)"
+    else
+        printf '  %s--no-doh: Chromium family left unchanged — it has no separate ECH switch.%s\n' "$Y" "$N"
+    fi
 fi
 echo
 

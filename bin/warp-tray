@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# warp-tray v3 (warp-killswitch)
+# warp-tray v4 (warp-killswitch park + Proton VPN fallback)
 #
 # Panoptes — the all-seeing network watch
 # https://github.com/doug445/Panoptes
@@ -26,10 +26,19 @@
 # SOFTWARE.
 #
 # Cloudflare WARP tray. Left-click: connect / disconnect. Right-click:
-# Tear Down / Rebuild / Heal now / Status (all via the root helper).
+# Tear Down / Rebuild / Heal now / Status (all via the root helper), and the
+# Proton VPN fallback: Connect (parks WARP first) / Disconnect (rebuilds WARP).
+#
+# Icon: green W = WARP on; red W = WARP off or torn down; orange W = WARP
+# parked for Proton VPN but Proton VPN is not up; yellow circle, black P =
+# Proton VPN on.
+#
+# Needs passwordless sudo for the helper, e.g. in /etc/sudoers.d/warp-killswitch:
+#   <user> ALL=(root) NOPASSWD: /usr/local/bin/warp-killswitch
 import fcntl
 import html
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -50,7 +59,12 @@ except OSError:
 KILLSWITCH = '/usr/local/bin/warp-killswitch'
 KILL_MARKERS = ('/var/lib/warp-killswitch/killed',
                 '/etc/systemd/resolved.conf.warpkill-bak')
+PARK_MARKER = '/var/lib/warp-killswitch/parked'
+PROTON = shutil.which('proton-fallback') or os.path.expanduser('~/.local/bin/proton-fallback')
+HAVE_PROTON = os.access(PROTON, os.X_OK)
 DEVNULL = subprocess.DEVNULL
+SUDO_HINT = (f'is passwordless sudo configured? (/etc/sudoers.d: '
+             f'<user> ALL=(root) NOPASSWD: {KILLSWITCH})')
 
 
 def notify(title, body, icon):
@@ -74,6 +88,20 @@ def is_killed():
     return any(os.path.exists(m) for m in KILL_MARKERS)
 
 
+def is_parked():
+    return os.path.exists(PARK_MARKER) and is_killed()
+
+
+def proton_connected():
+    if not HAVE_PROTON:
+        return False
+    try:
+        return subprocess.run([PROTON, 'state'], stdout=DEVNULL, stderr=DEVNULL,
+                              check=False, timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def warp_switch(action):
     # 'connect' or 'disconnect'. Tearing the tunnel down kills every DNS lookup
     # in flight over it; those fail DNSSEC with 'failed-auxiliary' and resolved
@@ -89,13 +117,35 @@ def warp_switch(action):
     threading.Thread(target=run, daemon=True).start()
 
 
+def run_helper(*args, timeout=300):
+    """sudo -n the root helper. Returns (rc, stderr); rc -1 when it could not run.
+
+    The helper posts its own result notifications. What it cannot report is
+    never having run at all — no NOPASSWD rule, a missing binary — so that is
+    reported here, from its stderr.
+    """
+    try:
+        res = subprocess.run(['sudo', '-n', KILLSWITCH, *args], capture_output=True,
+                             text=True, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return -1, 'timed out'
+    except OSError as e:
+        return -1, str(e)
+    if res.returncode != 0 and ('sudo:' in res.stderr or 'password' in res.stderr
+                                or 'not found' in res.stderr):
+        return -1, res.stderr.strip()
+    return res.returncode, res.stderr.strip()
+
+
 def killswitch(action):
-    # 'down' | 'up' | 'heal'. The helper posts its own result notification.
+    # 'down' | 'up' | 'heal'.
     def run():
-        subprocess.run(['sudo', KILLSWITCH, action],
-                       stdout=DEVNULL, stderr=DEVNULL, check=False)
-        subprocess.run(['resolvectl', 'flush-caches'],
-                       stdout=DEVNULL, stderr=DEVNULL, check=False)
+        rc, err = run_helper(action)
+        if rc == -1:
+            notify('Cloudflare WARP', f'{action} did not run: {err or "unknown error"} — {SUDO_HINT}',
+                   'network-error')
+            return
+        subprocess.run(['resolvectl', 'flush-caches'], stdout=DEVNULL, stderr=DEVNULL, check=False)
     threading.Thread(target=run, daemon=True).start()
     if action == 'down':
         notify('Cloudflare WARP', 'Tearing down the WARP stack…', 'network-error')
@@ -105,14 +155,36 @@ def killswitch(action):
         notify('Cloudflare WARP', 'Running heal — checking link, tunnel and DNS…', 'network-vpn')
 
 
-def show_status():
+def proton(action):
+    # 'on' | 'off'. proton-fallback parks/unparks WARP and posts its own notifications.
     def run():
         try:
-            res = subprocess.run(['sudo', KILLSWITCH, 'status'], capture_output=True,
-                                 text=True, check=False, timeout=60)
-            out = res.stdout.strip() or res.stderr.strip() or '(no output)'
+            subprocess.run([PROTON, action], stdout=DEVNULL, stderr=DEVNULL,
+                           check=False, timeout=600)
         except (OSError, subprocess.SubprocessError) as e:
-            out = f'status failed: {e}'
+            notify('Proton VPN', f'proton-fallback {action} failed: {e}', 'network-error')
+    threading.Thread(target=run, daemon=True).start()
+
+
+def show_status():
+    def run():
+        rc, err = run_helper('status', timeout=60)
+        if rc == -1:
+            out = f'status did not run: {err} — {SUDO_HINT}'
+        else:
+            try:
+                res = subprocess.run(['sudo', '-n', KILLSWITCH, 'status'], capture_output=True,
+                                     text=True, check=False, timeout=60)
+                out = res.stdout.strip() or res.stderr.strip() or '(no output)'
+            except (OSError, subprocess.SubprocessError) as e:
+                out = f'status failed: {e}'
+        if HAVE_PROTON:
+            try:
+                p = subprocess.run([PROTON, 'status'], capture_output=True, text=True,
+                                   check=False, timeout=30)
+                out += '\n' + p.stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                pass
         notify('WARP status', html.escape(out), 'network-vpn')
     threading.Thread(target=run, daemon=True).start()
 
@@ -121,28 +193,56 @@ LABEL_DOWN = "\U0001F534  Last Resort: Tear Down (reset internet)"
 LABEL_UP = "\U0001F7E2  Rebuild WARP + restore DNS"
 LABEL_HEAL = "\U0001FA7A  Heal now (auto-repair)"
 LABEL_STATUS = "ℹ️  Status"
+LABEL_PROTON_ON = "\U0001F7E1  Proton VPN: Connect (parks WARP first)"
+LABEL_PROTON_OFF = "⏹️  Proton VPN: Disconnect → rebuild WARP"
 
 desktop = os.environ.get('XDG_CURRENT_DESKTOP', '').lower()
 home = os.path.expanduser('~')
 ICON_GREEN = f"{home}/.local/share/icons/warp-green.svg"
 ICON_RED = f"{home}/.local/share/icons/warp-red.svg"
+ICON_PARKED = f"{home}/.local/share/icons/warp-parked.svg"
+ICON_PROTON = f"{home}/.local/share/icons/proton-yellow.svg"
+ICONS = (ICON_GREEN, ICON_RED, ICON_PARKED, ICON_PROTON)
 
 
-def tooltip():
+def state():
+    """(tooltip, icon path, proton_on). One probe per poll, in the cheap order."""
+    if proton_connected():
+        parked = is_parked()
+        return ("Proton VPN on — WARP parked" if parked else "Proton VPN on — WARP off"), ICON_PROTON, True
     if check_status():
-        return "Cloudflare WARP on", True
+        return "Cloudflare WARP on", ICON_GREEN, False
+    if is_parked():
+        return "Cloudflare WARP — PARKED for Proton VPN, which is not connected. Rebuild from the menu.", ICON_PARKED, False
     if is_killed():
-        return "Cloudflare WARP — KILLED (stack torn down)", False
-    return "Cloudflare WARP off", False
+        return "Cloudflare WARP — KILLED (stack torn down)", ICON_RED, False
+    return "Cloudflare WARP off", ICON_RED, False
 
 
 def left_click():
-    if check_status():
+    if proton_connected():
+        notify('Cloudflare WARP', 'Disconnect Proton VPN first — the two cannot run together.',
+               'network-error')
+    elif check_status():
         warp_switch('disconnect')
         notify('Cloudflare WARP', 'Disconnected', 'network-offline')
+    elif is_killed():
+        # The daemon is stopped and disabled; warp-cli connect cannot work.
+        notify('Cloudflare WARP',
+               'WARP is parked/torn down — use Rebuild from the right-click menu.',
+               'network-error')
     else:
         warp_switch('connect')
-        notify('Cloudflare WARP', 'Connected (Tunnel Only)', 'network-vpn')
+        notify('Cloudflare WARP', 'Connecting (Tunnel Only)…', 'network-vpn')
+
+
+def rebuild():
+    if proton_connected():
+        notify('Cloudflare WARP', 'Disconnect Proton VPN first — the two cannot run together.',
+               'network-error')
+        return False
+    killswitch('up')
+    return True
 
 
 if 'kde' in desktop:
@@ -157,30 +257,36 @@ if 'kde' in desktop:
             QTimer.singleShot(1500, update_ui)
 
     def update_ui():
-        text, on = tooltip()
-        tray.setIcon(icon_green if on else icon_red)
+        text, icon_path, proton_on = state()
+        tray.setIcon(icons[icon_path])
         tray.setToolTip(text)
+        act_proton.setText(LABEL_PROTON_OFF if proton_on else LABEL_PROTON_ON)
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-    icon_green = QIcon(ICON_GREEN)
-    icon_red = QIcon(ICON_RED)
+    icons = {p: QIcon(p) for p in ICONS}
     tray = QSystemTrayIcon()
 
     menu = QMenu()
     act_down = QAction(LABEL_DOWN)
     act_down.triggered.connect(lambda: (killswitch('down'), QTimer.singleShot(2500, update_ui)))
     act_up = QAction(LABEL_UP)
-    act_up.triggered.connect(lambda: (killswitch('up'), QTimer.singleShot(6000, update_ui)))
+    act_up.triggered.connect(lambda: (rebuild(), QTimer.singleShot(6000, update_ui)))
     act_heal = QAction(LABEL_HEAL)
     act_heal.triggered.connect(lambda: (killswitch('heal'), QTimer.singleShot(6000, update_ui)))
     act_status = QAction(LABEL_STATUS)
     act_status.triggered.connect(show_status)
+    act_proton = QAction(LABEL_PROTON_ON)
+    act_proton.triggered.connect(
+        lambda: (proton('off' if proton_connected() else 'on'), QTimer.singleShot(8000, update_ui)))
     menu.addAction(act_down)
     menu.addAction(act_up)
     menu.addSeparator()
     menu.addAction(act_heal)
     menu.addAction(act_status)
+    if HAVE_PROTON:
+        menu.addSeparator()
+        menu.addAction(act_proton)
     tray.setContextMenu(menu)
 
     update_ui()
@@ -191,26 +297,36 @@ if 'kde' in desktop:
     timer.start(2000)
     sys.exit(app.exec())
 
-elif 'cinnamon' in desktop or 'x-cinnamon' in desktop or 'xfce' in desktop:
-    # --- CINNAMON (XApp.StatusIcon) / XFCE (Gtk.StatusIcon) ---
+else:
+    # --- GTK: Cinnamon, MATE, XFCE, anything else ---
+    # XApp.StatusIcon where libxapp is present (Cinnamon, MATE, XFCE on Mint
+    # and its relatives): it speaks StatusNotifierItem and falls back to a
+    # legacy status icon by itself. Elsewhere Gtk.StatusIcon, which every X11
+    # notification area still accepts.
     import gi
     gi.require_version('Gtk', '3.0')
     from gi.repository import GLib, Gtk
-    use_xapp = 'cinnamon' in desktop
-    if use_xapp:
+    try:
         gi.require_version('XApp', '1.0')
         from gi.repository import XApp
-    else:
+        use_xapp = True
+    except (ValueError, ImportError):
         from gi.repository import GdkPixbuf
+        use_xapp = False
 
     def update_ui():
-        text, on = tooltip()
+        text, icon_path, proton_on = state()
         if use_xapp:
-            icon.set_icon_name(ICON_GREEN if on else ICON_RED)
-            icon.set_tooltip_text(text)
+            icon.set_icon_name(icon_path)
         else:
-            icon.set_from_pixbuf(pb_green if on else pb_red)
-            icon.set_tooltip_text(text)
+            pb = pixbufs.get(icon_path)
+            if pb is not None:
+                icon.set_from_pixbuf(pb)
+            else:
+                icon.set_from_icon_name('network-vpn')
+        icon.set_tooltip_text(text)
+        if mi_proton is not None:
+            mi_proton.set_label(LABEL_PROTON_OFF if proton_on else LABEL_PROTON_ON)
 
     def poll_status():
         update_ui()
@@ -220,21 +336,34 @@ elif 'cinnamon' in desktop or 'x-cinnamon' in desktop or 'xfce' in desktop:
         GLib.timeout_add(delay, lambda: update_ui() or GLib.SOURCE_REMOVE)
 
     def do_killswitch(action, delay):
-        killswitch(action)
+        if action == 'up':
+            rebuild()
+        else:
+            killswitch(action)
         later(delay)
 
+    def do_proton(_w):
+        proton('off' if proton_connected() else 'on')
+        later(8000)
+
     menu = Gtk.Menu()
-    for label, cb in ((LABEL_DOWN, lambda _w: do_killswitch('down', 2500)),
-                      (LABEL_UP, lambda _w: do_killswitch('up', 6000)),
-                      (None, None),
-                      (LABEL_HEAL, lambda _w: do_killswitch('heal', 6000)),
-                      (LABEL_STATUS, lambda _w: show_status())):
+    mi_proton = None
+    entries = [(LABEL_DOWN, lambda _w: do_killswitch('down', 2500)),
+               (LABEL_UP, lambda _w: do_killswitch('up', 6000)),
+               (None, None),
+               (LABEL_HEAL, lambda _w: do_killswitch('heal', 6000)),
+               (LABEL_STATUS, lambda _w: show_status())]
+    if HAVE_PROTON:
+        entries += [(None, None), (LABEL_PROTON_ON, do_proton)]
+    for label, cb in entries:
         if label is None:
             menu.append(Gtk.SeparatorMenuItem())
             continue
         mi = Gtk.MenuItem(label=label)
         mi.connect("activate", cb)
         menu.append(mi)
+        if label == LABEL_PROTON_ON:
+            mi_proton = mi
     menu.show_all()
 
     if use_xapp:
@@ -253,8 +382,12 @@ elif 'cinnamon' in desktop or 'x-cinnamon' in desktop or 'xfce' in desktop:
 
         def on_popup(_icon, button, time):
             menu.popup(None, None, Gtk.StatusIcon.position_menu, icon, button, time)
-        pb_green = GdkPixbuf.Pixbuf.new_from_file_at_size(ICON_GREEN, 22, 22)
-        pb_red = GdkPixbuf.Pixbuf.new_from_file_at_size(ICON_RED, 22, 22)
+        pixbufs = {}
+        for p in ICONS:
+            try:
+                pixbufs[p] = GdkPixbuf.Pixbuf.new_from_file_at_size(p, 22, 22)
+            except GLib.Error:
+                pass  # icon not installed yet: fall back to a themed icon
         icon = Gtk.StatusIcon()
         icon.connect("activate", on_activate)
         icon.connect("popup-menu", on_popup)
@@ -262,7 +395,3 @@ elif 'cinnamon' in desktop or 'x-cinnamon' in desktop or 'xfce' in desktop:
     update_ui()
     GLib.timeout_add(2000, poll_status)
     Gtk.main()
-
-else:
-    print(f"Unsupported desktop environment: {desktop}")
-    sys.exit(1)

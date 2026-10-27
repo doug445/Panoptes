@@ -25,7 +25,19 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 #
-# Installed by warp-killswitch install.sh. Root only. systemd + systemd-resolved.
+# Installed to /usr/local/bin by Panoptes install.sh; `warp-killswitch install`
+# adds the service pieces below. Root only. systemd + systemd-resolved.
+#
+#   install [--user NAME] [--no-watchdog] [--no-sudoers]
+#          Write the pieces that make the kill-switch a service, idempotently:
+#          warp-watchdog.service, the warp-svc ExecStopPost drop-in (crash
+#          purge), the system-sleep hook, the NetworkManager guard that keeps
+#          the WARP tun unmanaged, the NetworkManager connectivity-check
+#          disable, and a sudoers rule pinned to the exact invocations
+#          warp-tray and proton-fallback make (for NAME, default the invoking
+#          sudo user). Enables the watchdog when warp-svc is installed.
+#   uninstall
+#          Remove all of the above. State and logs are left in place.
 #
 #   down [--keep-dns] [--fast]
 #          Tear WARP and its whole network stack down to nothing: stop + DISABLE
@@ -37,6 +49,13 @@
 #   up     Restore DNS verbatim, re-enable + start the daemon, connect, and WAIT
 #          for a verified working tunnel. If that never happens, roll back to a
 #          clean disconnected state instead of leaving a lockdown firewall up.
+#   park   `down --keep-dns` plus a PARKED marker: the stack is stopped so
+#          another tunnel (ProtonVPN) can take the network without wedging
+#          WARP's daemon. The watchdog, heal and the sleep hooks stand by
+#          exactly as when killed; `state` says parked so the tray can tell a
+#          park (resumable, ⏸) from a deliberate teardown (💀).
+#   unpark Clear the PARKED marker and `up`. proton-fallback runs this when
+#          ProtonVPN disconnects, if it was the one that parked WARP.
 #   heal   One-shot smart repair (what the watchdog runs). Decides between
 #          "not WARP", stale-artifact purge, soft reset (disconnect/connect),
 #          and hard teardown, based on evidence. Safe to run any time.
@@ -47,7 +66,7 @@
 #          ExecStopPost of warp-svc so a crash can never leave the drop
 #          firewall behind. Non-blocking; exits 0 always.
 #   status One-screen health readout.   verify  online|offline (exit 0|1).
-#   state  killed|armed.                sleep-pre / sleep-post  (systemd hook)
+#   state  parked|killed|armed.         sleep-pre / sleep-post  (systemd hook)
 #
 # Touches ONLY WARP's own artifacts, systemd-resolved and (for a connectivity
 # re-check) NetworkManager. firewalld and other tunnels are never touched.
@@ -70,6 +89,7 @@ BACKUP=$RESOLVED_CONF.warpkill-bak          # exists  => DNS is swapped to plain
 RELOCK_FLAG=$RESOLVED_CONF.warpkill-relock  # exists  => re-apply chattr +i on up
 STATE_DIR=/var/lib/warp-killswitch
 KILLED_MARK=$STATE_DIR/killed               # exists  => user/watchdog killed WARP
+PARKED_MARK=$STATE_DIR/parked               # exists  => killed FOR another tunnel (resumable)
 RUN_DIR=/run/warp-killswitch
 LOCK=$RUN_DIR/lock
 LOG=/var/log/warp-killswitch.log
@@ -77,11 +97,21 @@ WARP_IF=CloudflareWARP
 WARP_TABLE_FALLBACK=65743
 WARP_FWMARK_FALLBACK=0x100cf
 NM_GUARD=/etc/NetworkManager/conf.d/99-warp-unmanaged.conf
+NM_CONCHECK=/etc/NetworkManager/conf.d/20-connectivity-disable.conf
+UNIT_WATCHDOG=/etc/systemd/system/warp-watchdog.service
+SVC_DROPIN=/etc/systemd/system/warp-svc.service.d/50-warp-killswitch.conf
+SLEEP_HOOK=/usr/lib/systemd/system-sleep/warp-killswitch
+SUDOERS=/etc/sudoers.d/panoptes-warp-killswitch
+SELF=/usr/local/bin/warp-killswitch         # the path the units and sudoers reference
 # /usr/local/bin/curl may be a minimal ECH build; prefer the distro one.
 CURL=/usr/bin/curl; [ -x "$CURL" ] || CURL=$(command -v curl || echo /bin/false)
 WARP="timeout 8 warp-cli --accept-tos"
 
-mkdir -p "$STATE_DIR" "$RUN_DIR" 2>/dev/null
+# World-readable on purpose: warp-tray and proton-fallback run as the user and
+# read the markers directly (sudo's umask would otherwise make them 0750/0640).
+install -d -m 0755 "$STATE_DIR" "$RUN_DIR" 2>/dev/null
+[ "$(stat -c %a "$STATE_DIR" 2>/dev/null)" = 755 ] || chmod 755 "$STATE_DIR" 2>/dev/null
+mark() { : > "$1" && chmod 644 "$1" 2>/dev/null; }
 [ -f "$LOG" ] && [ "$(stat -c %s "$LOG" 2>/dev/null || echo 0)" -gt 2000000 ] && $MV -f "$LOG" "$LOG.1"
 
 TAG=${TAG:-warp-killswitch}
@@ -111,6 +141,7 @@ notify() {
 }
 
 is_killed() { [ -f "$KILLED_MARK" ] || [ -f "$BACKUP" ]; }
+is_parked() { [ -f "$PARKED_MARK" ] && is_killed; }
 
 resolved_is_immutable() {
     lsattr "$RESOLVED_CONF" 2>/dev/null | awk 'NR==1{print $1}' | $GREP -q 'i'
@@ -426,7 +457,7 @@ warp_down() {
     log "  warp-svc stopped + disabled"
     # 4. force-remove whatever is left
     if purge_artifacts "$tbls"; then log "  artifacts purged: clean"; else log "  ! artifacts remain: $(artifacts_desc)"; fi
-    : > "$KILLED_MARK"
+    mark "$KILLED_MARK"
     # 5. DNS
     if [ "$keep_dns" -eq 0 ]; then write_plain_dns; log "  DNS -> plain 1.1.1.2 (captive-portal friendly)"; else flush_resolver; log "  DNS left as configured"; fi
     nm_refresh
@@ -434,7 +465,11 @@ warp_down() {
     for _ in 1 2 3 4 5; do
         if internet_or_portal; then
             log "  = ONLINE (plain internet)"
-            notify "WARP torn down" "Plain internet is working.$([ "$keep_dns" -eq 0 ] && echo ' DNS is plain 1.1.1.2 until you Rebuild.')" network-offline
+            if [ -f "$PARKED_MARK" ]; then
+                notify "WARP parked" "Daemon stopped, DNS kept. It stays parked until the other tunnel disconnects or you Rebuild." network-offline
+            else
+                notify "WARP torn down" "Plain internet is working.$([ "$keep_dns" -eq 0 ] && echo ' DNS is plain 1.1.1.2 until you Rebuild.')" network-offline
+            fi
             return 0
         fi
         sleep 2
@@ -450,9 +485,9 @@ warp_down() {
 }
 
 warp_up() {
-    log "REBUILD begin status=$(warp_status)"
+    log "REBUILD begin status=$(warp_status) parked=$([ -f "$PARKED_MARK" ] && echo yes || echo no)"
     restore_dns
-    rm -f "$KILLED_MARK"
+    rm -f "$KILLED_MARK" "$PARKED_MARK"
     systemctl unmask warp-svc >/dev/null 2>&1
     systemctl enable warp-svc >/dev/null 2>&1
     systemctl start  warp-svc >/dev/null 2>&1
@@ -484,8 +519,12 @@ warp_up() {
 heal() {
     local why="${1:-manual}" st
     TAG="warp-killswitch[heal:$why]"
-    if is_killed; then log "killed by user — nothing to do"; return 0; fi
-    if ! link_ok; then log "link layer down (dev=${LINK_DEV:-none} gw=${LINK_GW:-none}) — not a WARP problem"; return 2; fi
+    # The tray's "Heal now" deserves an answer even when there is nothing to
+    # fix; the watchdog's runs stay quiet on those paths.
+    mnote() { [ "$why" = manual ] && notify "$@"; return 0; }
+    if is_parked; then log "parked for another tunnel — nothing to do"; mnote "WARP heal" "WARP is parked for another tunnel — nothing to heal. Rebuild brings it back." network-offline; return 0; fi
+    if is_killed; then log "killed by user — nothing to do"; mnote "WARP heal" "WARP is torn down — nothing to heal. Rebuild brings it back." network-offline; return 0; fi
+    if ! link_ok; then log "link layer down (dev=${LINK_DEV:-none} gw=${LINK_GW:-none}) — not a WARP problem"; mnote "WARP heal" "The link itself is down (${LINK_DEV:-no default route}) — not a WARP problem." network-error; return 2; fi
     st=$(warp_status)
     if online_now; then
         if ! svc_active && artifacts_present; then
@@ -496,11 +535,14 @@ heal() {
             log "IP works but DNS fails — flushing resolver"
             dns_fix && log "DNS recovered" || log "DNS still failing after resolver restart"
         fi
+        log "healthy (status=$st)"
+        mnote "WARP heal" "Healthy: internet $(dns_ok && echo 'and DNS work' || echo 'works, DNS still failing'); WARP $st." network-vpn
         return 0
     fi
     # OFFLINE with a live link.
     if ! artifacts_present; then
         log "offline, link up, NO WARP artifacts (status=$st) — upstream/ISP problem, not WARP"
+        mnote "WARP heal" "Offline with no WARP in the path — an upstream or ISP problem." network-error
         return 2
     fi
     if ! svc_active; then
@@ -620,13 +662,20 @@ sleep_post() {
     rm -f "$RUN_DIR/reconnect-after-resume"
     is_killed && return 0
     log "resume: reconnecting WARP"
-    ( sleep 2; $WARP connect >/dev/null 2>&1; sleep 6; flush_resolver; nm_refresh ) >/dev/null 2>&1 &
+    # systemd-sleep is a oneshot: whatever is left in its cgroup is killed the
+    # moment the hook returns, so a backgrounded subshell never runs. Hand the
+    # delayed reconnect to a transient unit; fall back to doing it inline.
+    if ! systemd-run --quiet --collect --no-block --unit=warp-killswitch-resume --on-active=2 \
+            /bin/bash -c 'timeout 20 warp-cli --accept-tos connect >/dev/null 2>&1; sleep 6; timeout 8 resolvectl flush-caches; timeout 8 resolvectl reset-server-features; command -v nmcli >/dev/null 2>&1 && timeout 20 nmcli networking connectivity check' >/dev/null 2>&1; then
+        sleep 2; $WARP connect >/dev/null 2>&1; flush_resolver; nm_refresh
+    fi
     return 0
 }
 
 status_cmd() {
     local killed="armed" dns="intact" st eg link inet d
     is_killed && killed="KILLED"
+    is_parked && killed="PARKED (for another tunnel; resumable with unpark)"
     [ -f "$BACKUP" ] && dns="swapped to plain (backup present)"
     st=$(warp_status)
     echo "warp-killswitch status — $(uname -n)  $(date '+%F %T')"
@@ -645,23 +694,186 @@ status_cmd() {
     echo "  NM concheck: $([ -f /etc/NetworkManager/conf.d/20-connectivity-disable.conf ] && echo 'off (watchdog is the monitor)' || echo 'ON — device-bound probe is dropped by WARP; expect false limited')   nm says: $(nmcli -t -f CONNECTIVITY general 2>/dev/null)"
     echo "  watchdog   : $(systemctl is-active warp-watchdog 2>&1) / $(systemctl is-enabled warp-watchdog 2>&1)"
     echo "  svc drop-in: $([ -f /etc/systemd/system/warp-svc.service.d/50-warp-killswitch.conf ] && echo present || echo missing)"
-    echo "  sleep hook : $([ -x /usr/lib/systemd/system-sleep/warp-killswitch ] && echo present || echo missing)"
+    echo "  sleep hook : $([ -x "$SLEEP_HOOK" ] && echo present || echo missing)   sudoers: $([ -f "$SUDOERS" ] && echo pinned || echo missing)"
     echo "  resolved   : $(resolvectl status 2>/dev/null | awk -F': ' '/Current DNS Server/{print $2; exit}')  immutable=$(resolved_is_immutable && echo yes || echo no)"
     echo "  last log   : $(tail -n 1 "$LOG" 2>/dev/null)"
+}
+
+# ----------------------------------------------------------------- install --
+# Every file is compared before it is written, so a re-run reports "unchanged"
+# and touches nothing. The units reference $SELF, not $0: a copy run from a
+# checkout must not bake its own path into the system.
+INSTALL_CHANGED=0
+put_file() {   # put_file PATH MODE  (content on stdin)
+    local path=$1 mode=$2 tmp
+    tmp=$(mktemp) || return 1
+    $CAT > "$tmp"
+    if [ -f "$path" ] && cmp -s "$tmp" "$path"; then
+        $RM -f "$tmp"; echo "  = $path (unchanged)"; return 0
+    fi
+    if install -D -m "$mode" "$tmp" "$path"; then echo "  + $path"; INSTALL_CHANGED=1; else echo "  ! could not write $path"; fi
+    $RM -f "$tmp"
+}
+
+install_cmd() {
+    local user="" watchdog=1 sudoers=1
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --user) shift; user=${1:-} ;;
+            --no-watchdog) watchdog=0 ;;
+            --no-sudoers) sudoers=0 ;;
+            *) echo "install: unknown option $1" >&2; return 2 ;;
+        esac
+        shift
+    done
+    [ "$(id -u)" -eq 0 ] || { echo "install needs root" >&2; return 1; }
+    [ -n "$user" ] || user="${SUDO_USER:-}"
+    [ "$user" = root ] && user=""
+    [ -x "$SELF" ] || echo "  ! $SELF is not installed yet; the units below reference it (run Panoptes install.sh)"
+
+    put_file "$UNIT_WATCHDOG" 0644 <<UNIT
+[Unit]
+Description=Cloudflare WARP blackhole watchdog (warp-killswitch)
+Documentation=file:$SELF
+After=network.target warp-svc.service
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=$SELF watchdog
+Restart=always
+RestartSec=5
+Nice=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    put_file "$SVC_DROPIN" 0644 <<DROPIN
+# Installed by \`warp-killswitch install\`.
+# warp-svc installs an nftables table with policy DROP on input AND output plus
+# a policy-routing rule. If the daemon crashes, is SIGKILLed, or is stopped
+# uncleanly those stay behind and nothing but the LAN works. ExecStopPost runs
+# after ANY exit, clean or not, and removes them. Non-blocking, always exits 0.
+# (systemd skips it only for \`systemctl kill\`, which the helper covers by
+# purging itself after its own SIGKILL fallback.)
+[Service]
+ExecStopPost=-$SELF purge
+DROPIN
+    put_file "$SLEEP_HOOK" 0755 <<HOOK
+#!/bin/bash
+# Installed by \`warp-killswitch install\`. A tunnel that goes to sleep comes
+# back stale; with WARP's lockdown firewall that reads as "no internet" until
+# the daemon notices. Disconnect cleanly before sleep, reconnect after resume.
+case "\$1" in
+    pre)  $SELF sleep-pre ;;
+    post) $SELF sleep-post ;;
+esac
+exit 0
+HOOK
+    put_file "$NM_GUARD" 0644 <<GUARD
+# Installed by \`warp-killswitch install\` (the same guard netmaster harden writes).
+# Cloudflare WARP's tun must NEVER be managed by NetworkManager: an adopted
+# external tun that gets \`nmcli con mod\`-ed is persisted to disk with
+# autoconnect=yes and ~300 static routes, and NM then rebuilds a routing
+# blackhole into a dead tunnel on every network change (2026-08-13 outage).
+# Firewall posture is unchanged: with no NM zone binding the interface falls
+# through to firewalld's default zone.
+[keyfile]
+unmanaged-devices=interface-name:$WARP_IF
+GUARD
+    put_file "$NM_CONCHECK" 0644 <<CONCHECK
+# Installed by \`warp-killswitch install\` (removed by \`warp-killswitch uninstall\`).
+# NetworkManager's periodic connectivity probe is bound to the physical device,
+# which bypasses the WARP tunnel; WARP's lockdown firewall drops it, so the
+# desktop showed "limited connectivity" every 5 minutes while the internet
+# worked. With WARP in tunnel-only mode this probe can never be truthful.
+# Disabled: NM reports full for any device with a default route. The
+# warp-watchdog service probes raw IP through the real route and detects
+# captive portals itself. \`netmaster portal\` moves this file aside when you
+# need NM's portal prompt; \`netmaster restore\` puts it back.
+[connectivity]
+enabled=false
+interval=0
+CONCHECK
+    if [ "$sudoers" -eq 0 ]; then
+        echo "  (--no-sudoers: tray rule not written)"
+    elif [ -n "$user" ]; then
+        if ! id "$user" >/dev/null 2>&1; then echo "  ! no such user: $user — sudoers rule not written"
+        else
+            local tmp; tmp=$(mktemp)
+            $CAT > "$tmp" <<SUDO
+# Installed by \`warp-killswitch install\`. Lets $user drive the WARP kill-switch
+# from warp-tray and proton-fallback without a password. Pinned to the exact
+# invocations they make; anything else still asks.
+$user ALL=(root) NOPASSWD: $SELF down, $SELF down --keep-dns, $SELF up, $SELF heal, $SELF heal manual, $SELF status, $SELF state, $SELF park, $SELF unpark
+SUDO
+            if visudo -cf "$tmp" >/dev/null 2>&1; then put_file "$SUDOERS" 0440 < "$tmp"
+            else echo "  ! generated sudoers rule failed visudo -c; not installed"; fi
+            $RM -f "$tmp"
+            # Broader rules for the same binary left by earlier tooling deserve a look.
+            local other
+            other=$($GREP -ls "warp-killswitch" /etc/sudoers.d/* 2>/dev/null | $GREP -vx "$SUDOERS" | tr '\n' ' ')
+            [ -n "$other" ] && echo "  ! other sudoers files also mention warp-killswitch: $other — review them; this one is pinned"
+        fi
+    else
+        echo "  (no --user and no SUDO_USER: sudoers rule for the tray not written)"
+    fi
+    systemctl daemon-reload >/dev/null 2>&1
+    command -v nmcli >/dev/null 2>&1 && timeout 10 nmcli general reload conf >/dev/null 2>&1
+    if [ "$watchdog" -eq 1 ]; then
+        if systemctl list-unit-files 2>/dev/null | $GREP -q '^warp-svc\.service'; then
+            if systemctl is-enabled --quiet warp-watchdog 2>/dev/null && systemctl is-active --quiet warp-watchdog 2>/dev/null; then
+                echo "  = warp-watchdog enabled and running (unchanged)"
+            else
+                systemctl enable --now warp-watchdog >/dev/null 2>&1 && { echo "  + warp-watchdog enabled and started"; INSTALL_CHANGED=1; } \
+                    || echo "  ! could not enable warp-watchdog"
+            fi
+        else
+            echo "  warp-svc is not installed: watchdog unit written but not enabled (warp-setup.sh enables it with WARP)"
+        fi
+    fi
+    [ "$INSTALL_CHANGED" -eq 0 ] && echo "Nothing changed — already in the desired state." || echo "Done."
+    return 0
+}
+
+uninstall_cmd() {
+    [ "$(id -u)" -eq 0 ] || { echo "uninstall needs root" >&2; return 1; }
+    local f removed=0
+    systemctl disable --now warp-watchdog >/dev/null 2>&1
+    for f in "$UNIT_WATCHDOG" "$SVC_DROPIN" "$SLEEP_HOOK" "$NM_GUARD" "$NM_CONCHECK" "$SUDOERS"; do
+        [ -e "$f" ] || continue
+        $RM -f "$f" && { echo "  - $f"; removed=$((removed + 1)); }
+    done
+    rmdir /etc/systemd/system/warp-svc.service.d 2>/dev/null
+    systemctl daemon-reload >/dev/null 2>&1
+    command -v nmcli >/dev/null 2>&1 && timeout 10 nmcli general reload conf >/dev/null 2>&1
+    [ "$removed" -eq 0 ] && echo "Nothing to remove." || echo "Removed $removed file(s). $STATE_DIR and $LOG were left in place."
+    return 0
 }
 
 with_lock() { exec 9>"$LOCK"; flock -w 60 9 || { log "another warp-killswitch operation is running"; exit 5; }; }
 
 case "${1:-}" in
-    down)       shift; with_lock; warp_down "$@" ;;
+    # A deliberate teardown is not a park: drop the marker so the tray shows 💀.
+    down)       shift; with_lock; rm -f "$PARKED_MARK"; warp_down "$@" ;;
     up)         with_lock; warp_up ;;
+    park)       shift; with_lock
+                if is_parked; then log "already parked"; exit 0; fi
+                mark "$PARKED_MARK"; warp_down --keep-dns "$@" ;;
+    unpark)     with_lock
+                if ! is_parked; then
+                    log "not parked (state=$(is_killed && echo killed || echo armed)) — nothing to do"; exit 0
+                fi
+                warp_up ;;
     heal)       with_lock; heal "${2:-manual}" ;;
     watchdog)   watchdog ;;
     purge)      exec 9>"$LOCK"; flock -n 9 || exit 0; purge_cmd ;;
     status)     status_cmd ;;
-    state)      is_killed && echo killed || echo armed ;;
+    state)      if is_parked; then echo parked; elif is_killed; then echo killed; else echo armed; fi ;;
     verify)     if internet_or_portal; then echo online; exit 0; else echo offline; exit 1; fi ;;
     sleep-pre)  sleep_pre ;;
     sleep-post) sleep_post ;;
-    *)          echo "usage: $0 {down [--keep-dns] [--fast]|up|heal|watchdog|purge|status|state|verify}" >&2; exit 2 ;;
+    install)    shift; install_cmd "$@" ;;
+    uninstall)  uninstall_cmd ;;
+    *)          echo "usage: $0 {down [--keep-dns] [--fast]|up|park [--fast]|unpark|heal|watchdog|purge|status|state|verify|install [--user NAME] [--no-watchdog] [--no-sudoers]|uninstall}" >&2; exit 2 ;;
 esac

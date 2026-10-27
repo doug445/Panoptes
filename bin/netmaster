@@ -30,7 +30,7 @@
 # fix-warp-killswitch.sh, mac-test.sh. Delegates to (but does not require)
 # wifi-recover.sh, netrescue, audit-dns.sh, dns-toggle, warp-killswitch.
 #
-# With warp-killswitch v3 installed (warp-killswitch/install.sh), rung R4
+# With warp-killswitch v3 installed (`warp-killswitch install`), rung R4
 # delegates to `warp-killswitch purge` (v4+v6 rules, every nft family, main-
 # table routes, the tun), and its watchdog + warp-svc ExecStopPost purge heal
 # most blackholes before netmaster is ever needed. `netmaster status` shows
@@ -129,6 +129,7 @@ CP=/usr/bin/cp
 RM=/usr/bin/rm
 MKDIR=/usr/bin/mkdir
 TAR=/usr/bin/tar
+TAC=/usr/bin/tac
 IW=/usr/sbin/iw;            [ -x "$IW" ] || IW=/usr/bin/iw
 RFKILL=/usr/sbin/rfkill;    [ -x "$RFKILL" ] || RFKILL=/usr/bin/rfkill
 
@@ -203,10 +204,14 @@ trap own_back EXIT
 
 # Wi-Fi PSKs and WARP keys are cleartext in the files we cat. Scrub on the way out.
 scrub() {
-    $SED -E \
+    # -u: line-buffered. Into a pipe sed block-buffers, and the newline-less
+    # confirm() prompt would sit in the buffer while `read` blocks.
+    $SED -u -E \
       -e 's/((psk|preshared-key|private-key|secret_key|api_token|password|passwd|secret|wep-key[0-9]*)[[:space:]]*[":=]+[[:space:]]*"?)[^",]*/\1<redacted>/Ig' \
       -e 's/(PrivateKey[[:space:]]*=[[:space:]]*).*/\1<redacted>/I'
 }
+# Remember whether stdout was a terminal BEFORE it becomes the scrub pipe.
+TTY=0; [ -t 1 ] && TTY=1
 exec > >(scrub | /usr/bin/tee "$LOG") 2>&1
 
 # Undo journal: every mutating action appends a shell line here.
@@ -217,7 +222,7 @@ UNDO="$STATE_DIR/undo-$STAMP.sh"
 # ===========================================================================
 # output helpers
 # ===========================================================================
-if [ -t 1 ]; then
+if [ "$TTY" -eq 1 ]; then
     C_R=$'\033[31m'; C_G=$'\033[32m'; C_Y=$'\033[33m'; C_B=$'\033[1;36m'; C_0=$'\033[0m'
 else C_R=; C_G=; C_Y=; C_B=; C_0=; fi
 
@@ -351,10 +356,19 @@ verdict() {
 # D1. Routes pointing into a device that is down. THE killer. Highest priority.
 BLACKHOLE_DEVS=""; BLACKHOLE_N=0
 detect_blackhole() {
-    BLACKHOLE_N=$($IP -4 route show 2>/dev/null | $GREP -c 'linkdown')
-    BLACKHOLE_DEVS=$($IP -4 route show 2>/dev/null | $GREP 'linkdown' \
-        | $GREP -oE 'dev [^ ]+' | $AWK '{print $2}' | /usr/bin/sort -u | /usr/bin/tr '\n' ' ')
-    BLACKHOLE_DEVS="${BLACKHOLE_DEVS% }"
+    BLACKHOLE_N=0; BLACKHOLE_DEVS=""
+    local d n
+    for d in $($IP -4 route show 2>/dev/null | $GREP 'linkdown' \
+        | $GREP -oE 'dev [^ ]+' | $AWK '{print $2}' | /usr/bin/sort -u); do
+        # A port-less bridge (virbr0, docker0) and an unplugged physical NIC both
+        # carry linkdown connected routes legitimately — never flush or delete those.
+        [ -e "/sys/class/net/$d/device" ] && continue
+        [ -d "/sys/class/net/$d/bridge" ] && continue
+        n=$($IP -4 route show dev "$d" 2>/dev/null | $GREP -c 'linkdown')
+        BLACKHOLE_N=$((BLACKHOLE_N + n))
+        BLACKHOLE_DEVS="$BLACKHOLE_DEVS $d"
+    done
+    BLACKHOLE_DEVS="${BLACKHOLE_DEVS# }"
 }
 
 # D2. NM profiles for tunnel devices that carry STATIC routes. THE root cause.
@@ -369,9 +383,10 @@ detect_poison_profiles() {
         $GREP -qE '^type=(tun|tap|wireguard|vpn)' "$f" || continue
         n=$($GREP -cE '^route[0-9]+=' "$f")
         [ "${n:-0}" -ge 4 ] || continue
-        POISON_PROFILES="$POISON_PROFILES $f:$n"
+        # newline-joined: keyfile names carry the SSID, which may contain spaces
+        POISON_PROFILES="$POISON_PROFILES$f:$n"$'\n'
     done
-    POISON_PROFILES="${POISON_PROFILES# }"
+    POISON_PROFILES="${POISON_PROFILES%$'\n'}"
 }
 
 # D3. initrd-generated NM profiles shadowing the real ones.
@@ -385,9 +400,9 @@ detect_shadow_profiles() {
         [ -f "$f" ] || continue
         $GREP -qE '^type=loopback' "$f" && continue
         $GREP -qE '^(nm-generated|volatile)=true' "$f" && continue
-        SHADOW_PROFILES="$SHADOW_PROFILES $f"
+        SHADOW_PROFILES="$SHADOW_PROFILES$f"$'\n'
     done
-    SHADOW_PROFILES="${SHADOW_PROFILES# }"
+    SHADOW_PROFILES="${SHADOW_PROFILES%$'\n'}"
 }
 
 # D4. firewalld drop-zone lockout: default zone is `drop` and a live NIC has no
@@ -402,18 +417,21 @@ detect_fw_lockout() {
     while IFS=: read -r uuid type name; do
         case "$type" in 802-11-wireless|802-3-ethernet|bond|bridge|vlan)
             z=$($NM -g connection.zone con show uuid "$uuid" 2>/dev/null)
-            [ -z "$z" ] && FW_LOCKOUT="$FW_LOCKOUT $uuid|$name"
+            [ -z "$z" ] && FW_LOCKOUT="$FW_LOCKOUT$uuid|$name"$'\n'
         ;; esac
     done < <($NM -t -f UUID,TYPE,NAME con show 2>/dev/null)
-    FW_LOCKOUT="${FW_LOCKOUT# }"
+    FW_LOCKOUT="${FW_LOCKOUT%$'\n'}"
 }
 
 # D5. warp-killswitch state machine consistency.
-KS_KILLED=0; KS_IMMUTABLE=0; KS_RELOCK=0
+KS_KILLED=0; KS_IMMUTABLE=0; KS_RELOCK=0; KS_SWAPPED=0
 detect_killswitch() {
     # v3 keeps a dedicated marker (down --keep-dns leaves resolved.conf alone).
     { [ -f "$RESOLVED_CONF.warpkill-bak" ] || [ -f /var/lib/warp-killswitch/killed ]; } \
         && KS_KILLED=1 || KS_KILLED=0
+    # The backup exists only when the DNS config was actually swapped to plain.
+    # killed + immutable alone is the normal `down --keep-dns` / `park` state.
+    [ -f "$RESOLVED_CONF.warpkill-bak" ] && KS_SWAPPED=1 || KS_SWAPPED=0
     [ -f "$RESOLVED_CONF.warpkill-relock" ] && KS_RELOCK=1 || KS_RELOCK=0
     KS_IMMUTABLE=0
     $LSATTR "$RESOLVED_CONF" 2>/dev/null | $AWK 'NR==1{print $1}' | $GREP -q 'i' && KS_IMMUTABLE=1
@@ -488,11 +506,12 @@ report() {
     hdr "NM-persisted tunnel profiles  (THE root cause)"
     if [ -n "$POISON_PROFILES" ]; then
         local e f n
-        for e in $POISON_PROFILES; do
+        while IFS= read -r e; do
+            [ -n "$e" ] || continue
             f="${e%:*}"; n="${e##*:}"
             bad "$(/usr/bin/basename "$f") carries $n STATIC routes"
             echo "       autoconnect=$($GREP -E '^autoconnect=' "$f" | /usr/bin/cut -d= -f2 || echo '<unset=yes>')"
-        done
+        done <<<"$POISON_PROFILES"
         echo "       A VPN profile never needs static routes — its daemon installs them at"
         echo "       connect time. Their presence means NM adopted an external tun and then"
         echo "       something ran 'nmcli con mod' on it, persisting it to disk with"
@@ -512,7 +531,7 @@ report() {
     hdr "initrd-generated NM profiles"
     if [ -n "$SHADOW_PROFILES" ]; then
         bad "runtime profile(s) in /run shadowing your real profile:"
-        /usr/bin/printf '       %s\n' $SHADOW_PROFILES
+        echo "$SHADOW_PROFILES" | $SED 's/^/       /'
     else
         ok "none (NM's own volatile profiles correctly ignored)"
     fi
@@ -523,7 +542,11 @@ report() {
         $FW --get-active-zones 2>/dev/null | $SED 's/^/       /'
         if [ -n "$FW_LOCKOUT" ]; then
             bad "default zone is 'drop' and these profiles have NO explicit zone — they inherit DROP:"
-            local e; for e in $FW_LOCKOUT; do echo "       ${e#*|}  (${e%%|*})"; done
+            local e
+            while IFS= read -r e; do
+                [ -n "$e" ] || continue
+                echo "       ${e#*|}  (${e%%|*})"
+            done <<<"$FW_LOCKOUT"
             echo "       That is the drop-zone lockout. Fix: netmaster fix"
         else
             ok "every wired/wireless profile is explicitly pinned"
@@ -536,8 +559,8 @@ report() {
     hdr "DNS"
     $RESOLVECTL status 2>/dev/null | /usr/bin/head -7 | $SED 's/^/       /'
     info "resolved.conf: immutable=$KS_IMMUTABLE  killswitch=$([ $KS_KILLED -eq 1 ] && echo killed || echo armed)  relock_pending=$KS_RELOCK"
-    if [ "$KS_KILLED" -eq 1 ] && [ "$KS_IMMUTABLE" -eq 1 ]; then
-        bad "killswitch is 'killed' but resolved.conf is STILL immutable — the DNS swap failed with EPERM"
+    if [ "$KS_SWAPPED" -eq 1 ] && [ "$KS_IMMUTABLE" -eq 1 ]; then
+        bad "DNS was swapped to plain but resolved.conf is STILL immutable — the DNS swap failed with EPERM"
         echo "       and your hardened DoT config is silently still live. Fix: netmaster fix"
     fi
     [ "$KS_KILLED" -eq 0 ] && [ "$KS_RELOCK" -eq 1 ] && \
@@ -608,6 +631,8 @@ fix_blackhole() {
     for dev in $BLACKHOLE_DEVS; do
         [ "$dev" = lo ] && continue
         [ "$dev" = "${WIFI_IF:-}" ] && { warn "refusing to delete the Wi-Fi device $dev"; continue; }
+        [ -e "/sys/class/net/$dev/device" ] && { warn "refusing to touch physical device $dev"; continue; }
+        [ -d "/sys/class/net/$dev/bridge" ] && { warn "refusing to touch bridge $dev"; continue; }
         [ "$DRY" -eq 0 ] && { $MKDIR -p "$BAKDIR"; $IP -4 route show 2>/dev/null | $GREP " dev $dev" > "$BAKDIR/routes-$dev.txt"; }
         # Flush BY DEVICE. Never feed route lines to `ip route del` — they end in
         # the output-only status flag `linkdown`, so every delete silently fails.
@@ -626,7 +651,8 @@ fix_poison_profiles() {
     if [ -n "$POISON_PROFILES" ]; then
         step "R2  NM-persisted tunnel profiles"
         local e f id
-        for e in $POISON_PROFILES; do
+        while IFS= read -r e; do
+            [ -n "$e" ] || continue
             f="${e%:*}"
             id=$($GREP -m1 -E '^id=' "$f" | /usr/bin/cut -d= -f2)
             id="${id:-$(/usr/bin/basename "$f" .nmconnection)}"
@@ -635,7 +661,7 @@ fix_poison_profiles() {
             act "deactivate '$id'"             "" $NM con down "$id"
             act "delete profile '$id'"         "" $NM con delete "$id"
             [ -f "$f" ] && act "remove $f" "" $RM -f "$f"
-        done
+        done <<<"$POISON_PROFILES"
         act "reload NM connections" "" $NM connection reload
         did=0
     fi
@@ -681,10 +707,11 @@ fix_shadow_profiles() {
     [ -n "$SHADOW_PROFILES" ] || return 1
     step "R3  initrd-generated shadow NM profiles"
     local f
-    for f in $SHADOW_PROFILES; do
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
         backup_file "$f"
         act "remove shadow profile $(/usr/bin/basename "$f")" "" $RM -f "$f"
-    done
+    done <<<"$SHADOW_PROFILES"
     act "reload NM connections" "" $NM connection reload
     return 0
 }
@@ -696,9 +723,11 @@ fix_stale_warp() {
     # warp-killswitch v3 knows every artifact WARP leaves (v4+v6 policy rules,
     # nft tables in every family, main-table routes, the tun). Delegate.
     if [ -x "$KILLSWITCH" ] && $GREP -q '^    purge)' "$KILLSWITCH" 2>/dev/null; then
+        # grep -c, not -q: -q exits on the first match, `ip -6 rule show` then
+        # dies of SIGPIPE and under pipefail the whole test reads false.
         if $NFT list tables 2>/dev/null | $GREP -qi cloudflare \
            || $IP link show "$WARP_IF" >/dev/null 2>&1 \
-           || { $IP rule show; $IP -6 rule show; } 2>/dev/null | $GREP -qE 'lookup 65743|fwmark 0x100cf'; then
+           || { $IP rule show; $IP -6 rule show; } 2>/dev/null | $GREP -cE 'lookup 65743|fwmark 0x100cf' >/dev/null; then
             step "R4  stale WARP artifacts"
             act "warp-killswitch purge (rules v4+v6, all nft tables, routes, tun)" "" $KILLSWITCH purge
             return 0
@@ -730,11 +759,12 @@ fix_fw_lockout() {
     local target=FedoraWorkstation
     $FW --get-zones 2>/dev/null | /usr/bin/tr ' ' '\n' | $GREP -qx "$target" || target=home
     local e uuid name
-    for e in $FW_LOCKOUT; do
+    while IFS= read -r e; do
+        [ -n "$e" ] || continue
         uuid="${e%%|*}"; name="${e#*|}"
         act "pin '$name' -> $target" "$NM con mod uuid $uuid connection.zone ''" \
             $NM con mod uuid "$uuid" connection.zone "$target"
-    done
+    done <<<"$FW_LOCKOUT"
     [ -n "$WIFI_IF" ] && act "apply to live $WIFI_IF now" "" $FW --zone="$target" --change-interface="$WIFI_IF"
     return 0
 }
@@ -743,8 +773,8 @@ fix_fw_lockout() {
 fix_killswitch_state() {
     detect_killswitch
     local did=1
-    if [ "$KS_KILLED" -eq 1 ] && [ "$KS_IMMUTABLE" -eq 1 ]; then
-        step "R6  killswitch is 'killed' but resolved.conf is immutable (writes are EPERM)"
+    if [ "$KS_SWAPPED" -eq 1 ] && [ "$KS_IMMUTABLE" -eq 1 ]; then
+        step "R6  DNS swapped to plain but resolved.conf is immutable (writes are EPERM)"
         backup_file "$RESOLVED_CONF"
         act "drop the immutable flag on resolved.conf" "$CHATTR +i $RESOLVED_CONF" \
             $CHATTR -i "$RESOLVED_CONF"
@@ -771,6 +801,10 @@ fix_bounce() {
 
 # R8. Wi-Fi driver reload. Last resort — it drops the association.
 fix_wifi_driver() {
+    # A driver reload cannot fix a resolver: if IP already flows, there is
+    # nothing here for it to do.
+    online && return 1
+    [ -d /sys/module/brcmfmac ] || { info "brcmfmac not loaded — skipping driver reload"; return 1; }
     step "R8  reload the Wi-Fi driver (this WILL drop the association)"
     confirm "  reload brcmfmac?" || return 1
     act "unblock rfkill"        "" $RFKILL unblock wifi
@@ -824,7 +858,7 @@ cmd_status() {
     echo "  dns        $($RESOLVECTL status 2>/dev/null | $AWK -F': ' '/DNS Servers|Current DNS Server/{print $2; exit}')"
     echo "  dns-proto  $($RESOLVECTL status 2>/dev/null | $AWK -F': ' '/Protocols/{print $2; exit}')"
     echo "  killswitch $([ -x "$KILLSWITCH" ] && $KILLSWITCH state 2>/dev/null || echo '<not installed>')"
-    echo "  watchdog   $($SCTL is-active warp-watchdog 2>/dev/null || echo inactive)   crash-purge=$([ -f /etc/systemd/system/warp-svc.service.d/50-warp-killswitch.conf ] && echo on || echo OFF)"
+    echo "  watchdog   $($SCTL is-active warp-watchdog 2>/dev/null)   crash-purge=$([ -f /etc/systemd/system/warp-svc.service.d/50-warp-killswitch.conf ] && echo on || echo OFF)"
     detect_guard && echo "  guard      ${C_G}installed${C_0} ($WARP_IF unmanaged)" \
                  || echo "  guard      ${C_R}MISSING${C_0} — run: netmaster harden"
     detect_blackhole
@@ -981,6 +1015,36 @@ patch_dropzone() {
     return 0
 }
 
+# write_plain_dns — swap resolved.conf for a plain, unencrypted config.
+# Shared by portal P1 (no killswitch to delegate to) and panic N4. Keeps the
+# original at $RESOLVED_CONF.warpkill-bak so `warp-killswitch up` and
+# `netmaster restore` both know how to put it back.
+write_plain_dns() {
+    detect_killswitch
+    [ "$KS_IMMUTABLE" -eq 1 ] && act "unlock resolved.conf" "$CHATTR +i $RESOLVED_CONF" $CHATTR -i "$RESOLVED_CONF"
+    # Leave the relock marker so restore/up re-arm the immutable flag.
+    [ "$DRY" -eq 0 ] && [ "$KS_IMMUTABLE" -eq 1 ] && : > "$RESOLVED_CONF.warpkill-relock"
+    backup_file "$RESOLVED_CONF"
+    if [ "$DRY" -eq 0 ]; then
+        [ -f "$RESOLVED_CONF.warpkill-bak" ] || $CP -a "$RESOLVED_CONF" "$RESOLVED_CONF.warpkill-bak"
+        $CAT > "$RESOLVED_CONF" <<'EOF'
+# netmaster panic/portal mode. Plain unencrypted DNS, no DoT, no DNSSEC.
+# The real config is at /etc/systemd/resolved.conf.warpkill-bak.
+# Restore with: netmaster restore
+[Resolve]
+DNS=1.1.1.1 9.9.9.9
+FallbackDNS=8.8.8.8
+DNSOverTLS=no
+DNSSEC=no
+MulticastDNS=no
+LLMNR=no
+EOF
+        echo "  ${C_G}did:${C_0}   wrote plain-DNS resolved.conf"
+    else
+        echo "  ${C_Y}would:${C_0} write plain-DNS resolved.conf"
+    fi
+}
+
 cmd_portal() {
     hdr "netmaster portal — captive-portal mode$([ $DRY -eq 1 ] && echo '  (DRY RUN)')"
     echo "  Makes a captive portal VISIBLE and its authorisation STICK:"
@@ -991,19 +1055,36 @@ cmd_portal() {
 
     step "P1  WARP down"
     [ -x "$KILLSWITCH" ] && act "warp-killswitch down" "" $KILLSWITCH down \
-        || { act "stop warp-svc" "" $SCTL stop warp-svc; act "disable warp-svc" "" $SCTL disable warp-svc; }
+        || { act "stop warp-svc" "" $SCTL stop warp-svc; act "disable warp-svc" "" $SCTL disable warp-svc
+             # no killswitch to swap DNS for us — the banner promised plain DNS
+             write_plain_dns; act "restart systemd-resolved" "" $SCTL restart systemd-resolved; }
     fix_stale_warp
 
     step "P2  stable MAC (a random MAC means the portal never remembers you)"
-    if [ -n "$SSID" ]; then
+    # Match the profile by DEVICE, as panic does: wl-driven cards do not report
+    # the SSID through `iw dev ... link`, so matching by name silently skips this.
+    if [ -n "$WIFI_IF" ]; then
         local uuid
-        uuid=$($NM -t -f UUID,NAME con show --active 2>/dev/null | $AWK -F: -v s="$SSID" '$2==s{print $1; exit}')
-        [ -n "$uuid" ] && act "pin '$SSID' to its permanent MAC" \
-            "$NM con mod uuid $uuid wifi.cloned-mac-address random" \
-            $NM con mod uuid "$uuid" wifi.cloned-mac-address permanent
-        [ -n "$uuid" ] && act "accept the network's DNS on '$SSID'" \
-            "$NM con mod uuid $uuid ipv4.ignore-auto-dns yes" \
-            $NM con mod uuid "$uuid" ipv4.ignore-auto-dns no
+        uuid=$($NM -t -f UUID,DEVICE con show --active 2>/dev/null | $AWK -F: -v d="$WIFI_IF" '$2==d{print $1; exit}')
+        if [ -n "$uuid" ]; then
+            local name mac iad
+            name=$($NM -g connection.id con show uuid "$uuid" 2>/dev/null); name="${name:-$uuid}"
+            mac=$($NM -g wifi.cloned-mac-address con show uuid "$uuid" 2>/dev/null)
+            iad=$($NM -g ipv4.ignore-auto-dns con show uuid "$uuid" 2>/dev/null)
+            # Record the previous values so `restore` can put them back exactly.
+            # mac may be empty, so it goes LAST: `read` collapses adjacent tabs.
+            [ "$DRY" -eq 0 ] && /usr/bin/printf '%s\t%s\t%s\n' "$uuid" "$iad" "$mac" > "$STATE_DIR/portal-profile.tsv"
+            act "pin '$name' to its permanent MAC" \
+                "$NM con mod uuid $uuid wifi.cloned-mac-address '${mac:-random}'" \
+                $NM con mod uuid "$uuid" wifi.cloned-mac-address permanent
+            act "accept the network's DNS on '$name'" \
+                "$NM con mod uuid $uuid ipv4.ignore-auto-dns ${iad:-yes}" \
+                $NM con mod uuid "$uuid" ipv4.ignore-auto-dns no
+        else
+            info "no active NM profile on $WIFI_IF — nothing to pin"
+        fi
+    else
+        info "no Wi-Fi interface found — nothing to pin"
     fi
 
     step "P3  re-enable NM connectivity checking so the portal is detected"
@@ -1063,27 +1144,7 @@ cmd_panic() {
     done
 
     step "N4  plain DNS"
-    detect_killswitch
-    [ "$KS_IMMUTABLE" -eq 1 ] && act "unlock resolved.conf" "$CHATTR +i $RESOLVED_CONF" $CHATTR -i "$RESOLVED_CONF"
-    backup_file "$RESOLVED_CONF"
-    if [ "$DRY" -eq 0 ]; then
-        [ -f "$RESOLVED_CONF.warpkill-bak" ] || $CP -a "$RESOLVED_CONF" "$RESOLVED_CONF.warpkill-bak"
-        $CAT > "$RESOLVED_CONF" <<'EOF'
-# netmaster panic mode. Plain unencrypted DNS, no DoT, no DNSSEC.
-# The real config is at /etc/systemd/resolved.conf.warpkill-bak.
-# Restore with: netmaster restore
-[Resolve]
-DNS=1.1.1.1 9.9.9.9
-FallbackDNS=8.8.8.8
-DNSOverTLS=no
-DNSSEC=no
-MulticastDNS=no
-LLMNR=no
-EOF
-        echo "  ${C_G}did:${C_0}   wrote plain-DNS resolved.conf"
-    else
-        echo "  ${C_Y}would:${C_0} write plain-DNS resolved.conf"
-    fi
+    write_plain_dns
 
     step "N5  firewalld — widen the live NIC's zone"
     # A `drop` zone cannot actually cause an outage: firewalld accepts
@@ -1093,17 +1154,22 @@ EOF
     # deliberate posture choice, it records what it changed so `restore` and
     # `undo` can both put it back exactly.
     if $SCTL is-active --quiet firewalld 2>/dev/null && [ -n "$WIFI_IF" ]; then
-        local prev_zone prev_uuid
+        local prev_zone prev_uuid def target=FedoraWorkstation
+        # Mint/Arch firewalld has no FedoraWorkstation zone — same fallback as R5.
+        $FW --get-zones 2>/dev/null | /usr/bin/tr ' ' '\n' | $GREP -qx "$target" || target=home
+        def=$($FW --get-default-zone 2>/dev/null)
         prev_zone=$($FW --get-zone-of-interface="$WIFI_IF" 2>/dev/null)
+        # An unbound interface prints the literal "no zone": it lives in the default.
+        case "$prev_zone" in ""|"no zone") prev_zone=${def:-drop} ;; esac
         prev_uuid=$($NM -t -f UUID,DEVICE con show --active 2>/dev/null | $AWK -F: -v d="$WIFI_IF" '$2==d{print $1; exit}')
         if [ "$DRY" -eq 0 ] && [ -n "$prev_uuid" ]; then
             /usr/bin/printf '%s\t%s\t%s\n' "$prev_uuid" "$WIFI_IF" \
                 "$($NM -g connection.zone con show uuid "$prev_uuid" 2>/dev/null)" \
                 > "$STATE_DIR/panic-zone.tsv"
         fi
-        act "widen $WIFI_IF: $prev_zone -> FedoraWorkstation" \
-            "$FW --zone='${prev_zone:-drop}' --change-interface='$WIFI_IF'" \
-            $FW --zone=FedoraWorkstation --change-interface="$WIFI_IF"
+        act "widen $WIFI_IF: $prev_zone -> $target" \
+            "$FW --zone='$prev_zone' --change-interface='$WIFI_IF'" \
+            $FW --zone="$target" --change-interface="$WIFI_IF"
     fi
 
     step "N6  bounce"
@@ -1121,8 +1187,19 @@ cmd_restore() {
     discover
 
     step "S1  restore DNS"
+    detect_killswitch
     if [ -x "$KILLSWITCH" ] && [ "$($KILLSWITCH state 2>/dev/null)" = killed ]; then
         act "warp-killswitch up (restores DNS verbatim + reconnects WARP)" "" $KILLSWITCH up
+    elif [ -f "$RESOLVED_CONF.warpkill-bak" ]; then
+        # panic/portal wrote plain DNS with no killswitch to hand it back to.
+        [ "$KS_IMMUTABLE" -eq 1 ] && act "unlock resolved.conf" "" $CHATTR -i "$RESOLVED_CONF"
+        act "restore resolved.conf from the plain-DNS backup" "" $CP -a "$RESOLVED_CONF.warpkill-bak" "$RESOLVED_CONF"
+        if [ "$KS_RELOCK" -eq 1 ]; then
+            act "relock resolved.conf (immutable)" "" $CHATTR +i "$RESOLVED_CONF"
+            act "remove the relock marker"        "" $RM -f "$RESOLVED_CONF.warpkill-relock"
+        fi
+        act "remove the plain-DNS backup" "" $RM -f "$RESOLVED_CONF.warpkill-bak"
+        act "restart systemd-resolved"    "" $SCTL restart systemd-resolved
     else
         info "killswitch already armed"
     fi
@@ -1144,11 +1221,28 @@ cmd_restore() {
             act "re-pin '$dev' profile to zone '$z'" "" $NM con mod uuid "$u" connection.zone "$z"
             act "apply '$z' to live $dev now"        "" $FW --zone="$z" --change-interface="$dev"
         else
-            info "profile had no explicit zone before panic — leaving it to the default"
+            # On an NM-managed device `firewall-cmd --change-interface` persisted
+            # the zone INTO the profile. Move the live interface back to the
+            # default zone first, then clear the profile (the FW call would
+            # re-persist whatever zone it was handed).
+            local def; def=$($FW --get-default-zone 2>/dev/null)
+            act "move live $dev back to the default zone '$def'" "" $FW --zone="$def" --change-interface="$dev"
+            act "clear zone on '$dev' profile (was unset)"       "" $NM con mod uuid "$u" connection.zone ''
         fi
         [ "$DRY" -eq 0 ] && $RM -f "$STATE_DIR/panic-zone.tsv"
     else
         info "panic mode never widened a zone — nothing to put back"
+    fi
+
+    step "S3b put back the Wi-Fi profile portal mode modified"
+    if [ -f "$STATE_DIR/portal-profile.tsv" ]; then
+        local pu iad mac
+        IFS=$'\t' read -r pu iad mac < "$STATE_DIR/portal-profile.tsv"
+        act "restore cloned-mac '${mac:-random}' + ignore-auto-dns '${iad:-yes}' on the Wi-Fi profile" "" \
+            $NM con mod uuid "$pu" wifi.cloned-mac-address "${mac:-random}" ipv4.ignore-auto-dns "${iad:-yes}"
+        [ "$DRY" -eq 0 ] && $RM -f "$STATE_DIR/portal-profile.tsv"
+    else
+        info "portal mode never modified a Wi-Fi profile — nothing to put back"
     fi
 
     step "S4  re-apply the guards"
@@ -1178,17 +1272,18 @@ cmd_warp() {
             | $GREP -E '^(warp|ip|loc|colo|gateway)=' | $SED 's/^/  /'
         echo "  routes in MAIN via $WARP_IF: $($IP -4 route show 2>/dev/null | $GREP -c "dev $WARP_IF")  (must be 0)"
         echo "  routes in table 65743:       $($IP route show table 65743 2>/dev/null | $GREP -c "dev $WARP_IF")  (normal when connected)"
-        echo "  NM manages the tun:          $($NM -t -f DEVICE,STATE device status 2>/dev/null | $AWK -F: -v i="$WARP_IF" '$1==i{print $2}' || echo '<absent>')  (must be 'unmanaged')"
+        echo "  NM manages the tun:          $($NM -t -f DEVICE,STATE device status 2>/dev/null | $AWK -F: -v i="$WARP_IF" '$1==i{print $2; f=1} END{if(!f)print "<absent>"}')  (must be 'unmanaged')"
         detect_guard && ok "durable guard installed" || bad "durable guard MISSING — run: netmaster harden"
         if $SCTL is-active --quiet warp-watchdog 2>/dev/null; then ok "warp-watchdog active — blackholes self-heal"
-        else warn "warp-watchdog not running — install warp-killswitch v3 (warp-killswitch/install.sh)"; fi
+        else warn "warp-watchdog not running — run: sudo warp-killswitch install"; fi
         ;;
       off)
         hdr "WARP off"
         confirm "  take WARP down?" || return 1
         if [ -x "$KILLSWITCH" ]; then
-            # warp-killswitch restarts systemd-resolved itself.
-            act "warp-killswitch down" "" $KILLSWITCH down
+            # `warp off` toggles WARP only — leave resolved.conf alone.
+            # warp-killswitch flushes the resolver cache itself.
+            act "warp-killswitch down --keep-dns (DNS config untouched)" "" $KILLSWITCH down --keep-dns
         else
             act "stop warp-svc.socket" "" $SCTL stop warp-svc.socket
             act "stop warp-svc"        "" $SCTL stop warp-svc
@@ -1316,7 +1411,10 @@ cmd_undo() {
     $CAT "$last" | $SED 's/^/    /'
     echo
     confirm "  run these undo commands?" || return 1
-    /usr/bin/bash "$last" 2>&1 | $SED 's/^/    /'
+    if [ "$DRY" -eq 1 ]; then echo "  would run the ${last##*/} journal above"; return 0; fi
+    # Producers append in forward order (e.g. `chattr +i` before the `cp` that
+    # needs the file writable), so the journal must be replayed in reverse.
+    $TAC "$last" | /usr/bin/bash 2>&1 | $SED 's/^/    /'
     act "reload NM connections" "" $NM connection reload
     act "restart NetworkManager" "" $SCTL restart NetworkManager
     [ "$DRY" -eq 0 ] && /usr/bin/sleep 5

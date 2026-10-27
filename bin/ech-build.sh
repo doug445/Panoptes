@@ -30,8 +30,10 @@
 # No mainstream distribution ships an ECH-capable curl, because no released
 # OpenSSL implements ECH. This builds Stephen Farrell's OpenSSL ECH branch into
 # /opt/openssl-ech (static, self-contained, touching nothing else), then builds
-# curl against it into /usr/local. /usr/local is not owned by any package
-# manager, so "dnf upgrade" and "apt full-upgrade" leave it alone forever.
+# curl against it into /usr/local as a single statically linked binary — no
+# shared libcurl is installed, so nothing but curl sees the ECH stack. /usr/local
+# is not owned by any package manager, so "dnf upgrade" and "apt full-upgrade"
+# leave it alone forever.
 #
 # Usage:
 #        ./ech-build.sh              build and install (asks for sudo at install)
@@ -136,15 +138,18 @@ verify() {
     say "Verifying"
     curl_has_ech "$c" || die "$c does not advertise ECH — the build did not take"
     ok "binary advertises ECH"
-    # Resolve libcurl through RUNPATH only. /usr/local/lib must never be added to
-    # /etc/ld.so.conf.d — that would hand this libcurl to every program on the box.
-    if command -v ldd >/dev/null 2>&1; then
-        local lib; lib=$(ldd "$c" 2>/dev/null | awk '/libcurl\.so/{print $3}')
-        [ -n "$lib" ] && ok "libcurl resolves to $lib ${D}(via RUNPATH)${N}"
-    fi
-    if grep -rqs "$CURL_PREFIX/lib" /etc/ld.so.conf.d/ 2>/dev/null; then
-        warn "$CURL_PREFIX/lib is in /etc/ld.so.conf.d — remove it. Every binary on"
-        warn "this system would then link this libcurl instead of the distribution's."
+    # libcurl is linked statically (--disable-shared), so no libcurl.so must exist
+    # under $CURL_PREFIX/lib. Debian-family systems put /usr/local/lib on the
+    # default ld.so path, so a shared one there would become libcurl for every
+    # program on the box (git, cmake, pycurl, ...).
+    if [ -e "$CURL_PREFIX/lib/libcurl.so.4" ]; then
+        warn "$CURL_PREFIX/lib/libcurl.so.4 exists — a shared libcurl from an older build."
+        warn "Remove it so other programs cannot link it instead of the distribution's:"
+        warn "  sudo rm $CURL_PREFIX/lib/libcurl.so* && sudo ldconfig"
+    elif ldconfig -p 2>/dev/null | grep -qF "$CURL_PREFIX/lib/libcurl.so"; then
+        warn "ldconfig still lists a libcurl under $CURL_PREFIX/lib — run: sudo ldconfig"
+    else
+        ok "no shared libcurl installed — nothing but this curl can use it"
     fi
     say "Live ECH handshake against $ECH_TEST_HOST"
     # --ech hard refuses to fall back to a cleartext SNI, so success is real.
@@ -192,7 +197,7 @@ if [ "$MODE" = uninstall ]; then
     say "This will remove:"
     echo "    $OPENSSL_PREFIX  (whole directory)"
     echo "    $CURL_PREFIX/bin/curl, curl-config"
-    echo "    $CURL_PREFIX/lib/libcurl.*"
+    echo "    $CURL_PREFIX/lib/libcurl.a (and any libcurl.so left by an older build)"
     echo "    $CURL_PREFIX/include/curl/"
     echo "    $CURL_PREFIX/lib/pkgconfig/libcurl.pc"
     echo "  Your distribution's /usr/bin/curl is untouched and becomes the default again."
@@ -250,7 +255,12 @@ fi
 fetch "$CURL_REPO" "$BUILD_DIR/curl-ech" "$CURL_REF"
 cd "$BUILD_DIR/curl-ech" || die "cannot enter curl build dir"
 
+# --disable-shared is deliberate: on Debian-family systems /usr/local/lib is on
+# the default ld.so path, so a shared libcurl here would become libcurl for every
+# program on the box. Linking it statically keeps the ECH stack inside this one
+# binary — nothing wider than curl.
 CONF_ARGS="--prefix=$CURL_PREFIX --with-openssl=$OPENSSL_PREFIX --enable-ech
+           --disable-shared --enable-static
            --with-nghttp2 --with-libidn2 --with-libpsl --disable-dependency-tracking"
 
 if [ "$FULL" -eq 1 ]; then
@@ -293,9 +303,10 @@ cat <<'NOTES'
   and the scp, sftp, smb and ldap protocols. If something breaks on one of
   those, call /usr/bin/curl explicitly — it is still installed.
 
-  Do NOT add /usr/local/lib to /etc/ld.so.conf.d. The new curl finds its libcurl
-  through the binary's RUNPATH; putting that directory on the global search path
-  would give this libcurl to every program on the system.
+  No shared libcurl was installed: the new curl links libcurl, libssl and
+  libcrypto statically, so no other program on the system can pick up this
+  ECH stack by accident — not even on distributions whose default ld.so path
+  already includes /usr/local/lib.
 
   ECH only engages when the HTTPS DNS record is fetched over a secure channel,
   which is why the verification above passes --doh-url. Run "checkdns" for the

@@ -1,0 +1,376 @@
+#!/usr/bin/env bash
+#
+# Panoptes — the all-seeing network watch
+# https://github.com/doug445/Panoptes
+#
+# Copyright (c) 2026 William MacKinnon <spilled-bowline0j@icloud.com>
+# SPDX-License-Identifier: MIT
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+# proton-fallback — Proton VPN as the fallback tunnel, with Cloudflare WARP
+# parked while it runs.
+#
+# WARP and another tunnel cannot share the machine: when a second tunnel takes
+# the network, a merely-disconnected WARP daemon wedges with its lockdown
+# firewall still loaded and raw internet dies. So `on` PARKS the WARP stack
+# first (`warp-killswitch park`: daemon stopped and disabled, DNS untouched,
+# the watchdog standing by), then connects Proton VPN and verifies it. `off`
+# disconnects Proton VPN and, if WARP was parked, rebuilds it. A WARP you tore
+# down yourself (`warp-killswitch down`) is left down either way.
+#
+# Usage:
+#   proton-fallback on [-- CONNECT ARGS]   park WARP, connect Proton VPN, verify
+#   proton-fallback off                    disconnect Proton VPN, unpark WARP
+#   proton-fallback toggle                 one or the other, by current state
+#   proton-fallback status                 driver, tunnel state, WARP state
+#   proton-fallback state                  prints connected|disconnected (exit 0 when connected)
+#   proton-fallback import FILE [--keep-dns]
+#                                          import a WireGuard (.conf) or OpenVPN (.ovpn) profile
+#                                          downloaded from account.proton.me into NetworkManager
+#   proton-fallback --dry-run <command>    print every step, change nothing
+#
+# CONNECT ARGS after `--` go to the driver, e.g. `on -- --country CH` with the
+# official CLI.
+#
+# Drivers, auto-detected in this order (override with PROTON_DRIVER):
+#   cli   the official `protonvpn` CLI (proton-setup.sh installs it)
+#   nm    a NetworkManager profile: PROTON_NM_CONNECTION, or the first
+#         WireGuard/VPN profile whose name contains "proton" (see `import`)
+#   wg    a wg-quick config: PROTON_WG_CONF, or /etc/wireguard/*proton*.conf
+#         (needs passwordless sudo for wg-quick)
+#   app   the Proton VPN desktop app: opened for you; you click Connect
+#
+# Configuration: environment, then ~/.config/panoptes/proton.conf (shell
+# syntax; environment wins). Keys: PROTON_DRIVER, PROTON_NM_CONNECTION,
+# PROTON_WG_CONF, PROTON_APP_CMD, PROTON_CONNECT_ARGS, PROTON_TIMEOUT (s).
+#
+# Needs: warp-killswitch (root helper, via passwordless sudo — the same rule
+# warp-tray uses) for parking; without it WARP is merely disconnected and a
+# warning says so. Exit codes: 0 done, 1 failed, 2 usage, 3 nothing to drive.
+
+set -uo pipefail
+LC_ALL=C
+export LC_ALL
+
+usage() { sed -n '/^# proton-fallback —/,/^[^#]/p' "$0" | sed -e '/^[^#]/d' -e 's/^# \?//'; }
+
+KILLSWITCH=/usr/local/bin/warp-killswitch
+PARKED_MARK=/var/lib/warp-killswitch/parked
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/panoptes/proton.conf"
+
+# ------------------------------------------------------------- configuration
+# Environment first, file second: remember what the environment set, source
+# the file, then put the environment values back.
+CFG_KEYS="PROTON_DRIVER PROTON_NM_CONNECTION PROTON_WG_CONF PROTON_APP_CMD PROTON_CONNECT_ARGS PROTON_TIMEOUT"
+for k in $CFG_KEYS; do eval "_env_$k=\${$k:-}"; done
+if [ -r "$CONF" ]; then
+    # shellcheck disable=SC1090
+    . "$CONF"
+fi
+for k in $CFG_KEYS; do eval "v=\${_env_$k}"; [ -n "$v" ] && eval "$k=\$v"; done
+PROTON_DRIVER="${PROTON_DRIVER:-}"
+PROTON_NM_CONNECTION="${PROTON_NM_CONNECTION:-}"
+PROTON_WG_CONF="${PROTON_WG_CONF:-}"
+PROTON_APP_CMD="${PROTON_APP_CMD:-}"
+PROTON_CONNECT_ARGS="${PROTON_CONNECT_ARGS:-}"
+PROTON_TIMEOUT="${PROTON_TIMEOUT:-45}"
+
+# ------------------------------------------------------------------ arguments
+DRY=0; CMD=""; EXTRA=(); KEEP_DNS=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run)  DRY=1 ;;
+        --keep-dns) KEEP_DNS=1 ;;
+        -h|--help)  usage; exit 0 ;;
+        --)         shift; EXTRA=("$@"); break ;;
+        -*)         echo "proton-fallback: unknown option: $1" >&2; exit 2 ;;
+        *)          if [ -z "$CMD" ]; then CMD=$1; else EXTRA+=("$1"); fi ;;
+    esac
+    shift
+done
+[ -n "$CMD" ] || { usage; exit 2; }
+
+if [ -t 1 ]; then B=$'\e[1m'; R=$'\e[0;31m'; G=$'\e[0;32m'; Y=$'\e[0;33m'; D=$'\e[0;90m'; N=$'\e[0m'
+else B=; R=; G=; Y=; D=; N=; fi
+say()  { printf '%s%s%s\n' "$B" "$*" "$N"; }
+ok()   { printf '  %s✓%s %s\n' "$G" "$N" "$*"; }
+warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*"; }
+fail() { printf '  %s✗ %s%s\n' "$R" "$*" "$N" >&2; }
+run() {
+    if [ "$DRY" -eq 1 ]; then printf '  %swould:%s %s\n' "$Y" "$N" "$*"; return 0; fi
+    "$@"
+}
+notify() {  # notify TITLE BODY [ICON]
+    command -v notify-send >/dev/null 2>&1 || return 0
+    notify-send -a "Proton VPN" -i "${3:-network-vpn}" --hint=string:desktop-entry:warp-tray "$1" "$2" >/dev/null 2>&1 || true
+}
+SUDO_N=""; [ "$(id -u)" -ne 0 ] && SUDO_N="sudo -n"
+
+# ------------------------------------------------------------- WARP (park)
+ks_state() {  # armed|killed|parked|absent
+    [ -x "$KILLSWITCH" ] || { echo absent; return; }
+    # `state` only reads markers, but the helper is root-only; the markers are
+    # world-readable, so read them directly when sudo is not available.
+    local s
+    s=$($SUDO_N "$KILLSWITCH" state 2>/dev/null)
+    case "$s" in
+        armed|killed|parked) echo "$s" ;;
+        *) if [ -f "$PARKED_MARK" ] && { [ -f /var/lib/warp-killswitch/killed ] || [ -f /etc/systemd/resolved.conf.warpkill-bak ]; }; then echo parked
+           elif [ -f /var/lib/warp-killswitch/killed ] || [ -f /etc/systemd/resolved.conf.warpkill-bak ]; then echo killed
+           else echo armed; fi ;;
+    esac
+}
+warp_connected() {
+    command -v warp-cli >/dev/null 2>&1 || return 1
+    [ "$(timeout 8 warp-cli --accept-tos status 2>/dev/null | sed -n 's/^Status update: *//p' | head -1)" = Connected ]
+}
+park_warp() {
+    case "$(ks_state)" in
+        parked) ok "WARP already parked"; return 0 ;;
+        killed) warn "WARP is torn down by you (warp-killswitch down) — leaving it that way"; return 0 ;;
+        absent)
+            if warp_connected; then
+                warn "warp-killswitch is not installed: disconnecting WARP only. Its daemon stays up and may wedge — install the kill-switch."
+                run timeout 20 warp-cli --accept-tos disconnect >/dev/null 2>&1
+            fi
+            return 0 ;;
+    esac
+    say "Parking WARP (daemon stopped, DNS kept)"
+    notify "Proton VPN" "Parking WARP first (daemon stopped, DNS kept)…" network-offline
+    if run $SUDO_N "$KILLSWITCH" park >/dev/null 2>&1; then ok "WARP parked"; return 0; fi
+    fail "could not park WARP — is passwordless sudo configured for $KILLSWITCH? Refusing to raise a second tunnel over a live WARP."
+    notify "Proton VPN" "Could not park WARP (sudo rule for warp-killswitch missing?). Not connecting." network-error
+    return 1
+}
+unpark_warp() {
+    [ "$(ks_state)" = parked ] || return 0
+    say "Rebuilding WARP"
+    notify "Proton VPN" "Proton VPN is off — rebuilding WARP…" network-vpn
+    run $SUDO_N "$KILLSWITCH" unpark >/dev/null 2>&1 && ok "WARP rebuilt" || { fail "warp-killswitch unpark failed — right-click the tray: Rebuild"; return 1; }
+}
+
+# -------------------------------------------------------------- detection
+# Whatever brought the tunnel up — CLI, app, an imported profile — it shows in
+# NetworkManager as an active connection or device named after Proton; wg-quick
+# shows as an interface. Cheap enough for a tray to poll.
+NM_ACTIVE=""
+proton_active_nm() {  # prints NAME of the active Proton NM connection, if any
+    command -v nmcli >/dev/null 2>&1 || return 1
+    while IFS=: read -r name type dev; do
+        case "${name,,}:${dev,,}" in
+            *proton*) printf '%s\n' "$name"; return 0 ;;
+        esac
+        [ -n "$PROTON_NM_CONNECTION" ] && [ "$name" = "$PROTON_NM_CONNECTION" ] && { printf '%s\n' "$name"; return 0; }
+        : "$type"
+    done < <(nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null)
+    return 1
+}
+wg_iface() { local c="${PROTON_WG_CONF:-}"; c=${c##*/}; printf '%s' "${c%.conf}"; }
+proton_connected() {
+    NM_ACTIVE=$(proton_active_nm) && return 0
+    [ -n "$(wg_iface)" ] && ip link show "$(wg_iface)" >/dev/null 2>&1 && return 0
+    ip link show proton0 >/dev/null 2>&1 && return 0
+    return 1
+}
+nm_profile() {  # configured (not necessarily active) Proton NM profile
+    command -v nmcli >/dev/null 2>&1 || return 1
+    if [ -n "$PROTON_NM_CONNECTION" ]; then
+        nmcli -t -f NAME connection show 2>/dev/null | grep -qxF "$PROTON_NM_CONNECTION" && { printf '%s' "$PROTON_NM_CONNECTION"; return 0; }
+        return 1
+    fi
+    nmcli -t -f NAME,TYPE connection show 2>/dev/null | awk -F: 'tolower($1) ~ /proton/ && ($2=="wireguard" || $2=="vpn"){print $1; exit}' | grep .
+}
+wg_conf() {
+    if [ -n "$PROTON_WG_CONF" ]; then [ -r "$PROTON_WG_CONF" ] || $SUDO_N test -r "$PROTON_WG_CONF" 2>/dev/null && { printf '%s' "$PROTON_WG_CONF"; return 0; }; return 1; fi
+    $SUDO_N find /etc/wireguard -maxdepth 1 -iname '*proton*.conf' 2>/dev/null | head -1 | grep .
+}
+app_cmd() {
+    [ -n "$PROTON_APP_CMD" ] && { printf '%s' "$PROTON_APP_CMD"; return 0; }
+    command -v protonvpn-app >/dev/null 2>&1 && { printf 'protonvpn-app'; return 0; }
+    command -v flatpak >/dev/null 2>&1 && flatpak info com.protonvpn.www >/dev/null 2>&1 && { printf 'flatpak run com.protonvpn.www'; return 0; }
+    return 1
+}
+cli_ok() { command -v protonvpn >/dev/null 2>&1 && protonvpn --help 2>/dev/null | grep -q 'Proton VPN command-line'; }
+app_running() { pgrep -f 'protonvpn-app|proton_vpn.*gtk|com\.protonvpn\.www' >/dev/null 2>&1; }
+
+DRIVER=""; TARGET=""
+detect_driver() {
+    case "$PROTON_DRIVER" in
+        cli) cli_ok && { DRIVER=cli; TARGET=$(command -v protonvpn); return 0; }; fail "PROTON_DRIVER=cli but the official protonvpn CLI is not installed"; return 1 ;;
+        nm)  TARGET=$(nm_profile) && { DRIVER="nm"; return 0; }; fail "PROTON_DRIVER=nm but no Proton NetworkManager profile (set PROTON_NM_CONNECTION or run: proton-fallback import FILE)"; return 1 ;;
+        wg)  TARGET=$(wg_conf) && { DRIVER=wg; return 0; }; fail "PROTON_DRIVER=wg but no wg-quick config (set PROTON_WG_CONF)"; return 1 ;;
+        app) TARGET=$(app_cmd) && { DRIVER=app; return 0; }; fail "PROTON_DRIVER=app but the Proton VPN app is not installed"; return 1 ;;
+        "")  ;;
+        *)   fail "unknown PROTON_DRIVER=$PROTON_DRIVER (cli|nm|wg|app)"; return 1 ;;
+    esac
+    if cli_ok; then DRIVER=cli; TARGET=$(command -v protonvpn); return 0; fi
+    if TARGET=$(nm_profile); then DRIVER="nm"; return 0; fi
+    if TARGET=$(wg_conf); then DRIVER=wg; return 0; fi
+    if TARGET=$(app_cmd); then DRIVER=app; return 0; fi
+    return 1
+}
+no_driver() {
+    fail "nothing to drive Proton VPN with."
+    echo "  Install the client:            sudo proton-setup.sh" >&2
+    echo "  or import a WireGuard profile: proton-fallback import ~/Downloads/<name>.conf" >&2
+    echo "  (download one at account.proton.me → Downloads → WireGuard configuration)" >&2
+    exit 3
+}
+
+# ------------------------------------------------------------------ drivers
+wait_for() {  # wait_for SECONDS PREDICATE
+    local i=0; while [ "$i" -lt "$1" ]; do "$2" && return 0; sleep 1; i=$((i + 1)); done; "$2"
+}
+not_connected() { ! proton_connected; }
+
+drv_connect() {
+    local args=("${EXTRA[@]}")
+    [ ${#args[@]} -eq 0 ] && [ -n "$PROTON_CONNECT_ARGS" ] && read -r -a args <<<"$PROTON_CONNECT_ARGS"
+    case "$DRIVER" in
+        cli)
+            if app_running; then
+                # The official CLI refuses while the app is open. Hand over to the app.
+                warn "the Proton VPN app is running; the CLI will not act beside it — click Connect in the app"
+                run "$TARGET" >/dev/null 2>&1 &
+                notify "Proton VPN" "Click Connect in the Proton VPN window." network-vpn
+                return 0
+            fi
+            local out rc
+            if [ "$DRY" -eq 1 ]; then run "$TARGET" connect "${args[@]}"; return 0; fi
+            out=$(timeout "$((PROTON_TIMEOUT + 15))" "$TARGET" connect "${args[@]}" 2>&1); rc=$?
+            printf '%s\n' "$out" | sed 's/^/    /'
+            if [ $rc -ne 0 ] || printf '%s' "$out" | grep -qiE 'sign ?in|not logged|session|login'; then
+                if printf '%s' "$out" | grep -qiE 'sign ?in|not logged|session|login'; then
+                    notify "Proton VPN" "Not signed in. Run: protonvpn signin <username>, or open the app." network-error
+                    fail "not signed in — run: protonvpn signin <username>"
+                fi
+                return 1
+            fi ;;
+        nm)  run nmcli --wait "$PROTON_TIMEOUT" connection up "$TARGET" >/dev/null || return 1 ;;
+        wg)  run $SUDO_N wg-quick up "$TARGET" >/dev/null 2>&1 || { fail "wg-quick up failed (passwordless sudo for wg-quick?)"; return 1; } ;;
+        app)
+            app_running || { run bash -c "setsid -f $TARGET >/dev/null 2>&1"; }
+            notify "Proton VPN" "Click Connect in the Proton VPN window. WARP is parked." network-vpn
+            echo "  Click Connect in the Proton VPN window (waiting up to $((PROTON_TIMEOUT * 2))s)…" ;;
+    esac
+    return 0
+}
+drv_disconnect() {
+    case "$DRIVER" in
+        cli)
+            if app_running; then
+                # No CLI beside the app — but the app's tunnel is an NM connection, so NM can drop it.
+                if [ -n "$NM_ACTIVE" ]; then run nmcli connection down "$NM_ACTIVE" >/dev/null 2>&1; fi
+            else
+                run timeout 60 "$TARGET" disconnect >/dev/null 2>&1
+            fi ;;
+        nm)  run nmcli connection down "$TARGET" >/dev/null 2>&1 ;;
+        wg)  run $SUDO_N wg-quick down "$TARGET" >/dev/null 2>&1 ;;
+        app) if [ -n "$NM_ACTIVE" ]; then run nmcli connection down "$NM_ACTIVE" >/dev/null 2>&1
+             else notify "Proton VPN" "Click Disconnect in the Proton VPN window." network-offline; fi ;;
+    esac
+    return 0
+}
+flush_resolver() {
+    # Switching tunnels kills DNS lookups in flight; resolved caches the
+    # DNSSEC failures and the desktop says "offline". Same cure as warp-tray.
+    run timeout 8 resolvectl flush-caches >/dev/null 2>&1
+    run timeout 8 resolvectl reset-server-features >/dev/null 2>&1
+    ( timeout 20 nmcli networking connectivity check >/dev/null 2>&1 & ) 2>/dev/null
+}
+
+# ----------------------------------------------------------------- commands
+cmd_on() {
+    detect_driver || no_driver
+    if proton_connected; then ok "Proton VPN already connected${NM_ACTIVE:+ ($NM_ACTIVE)}"; return 0; fi
+    say "Proton VPN on  ${D}(driver=$DRIVER target=$TARGET)${N}"
+    park_warp || return 1
+    drv_connect || { fail "connect failed"; return 1; }
+    [ "$DRY" -eq 1 ] && return 0
+    local t=$PROTON_TIMEOUT; [ "$DRIVER" = app ] && t=$((PROTON_TIMEOUT * 2))
+    if wait_for "$t" proton_connected; then
+        flush_resolver
+        ok "connected${NM_ACTIVE:+ ($NM_ACTIVE)}"
+        notify "Proton VPN" "Connected. WARP is parked until you disconnect." network-vpn
+        return 0
+    fi
+    fail "no Proton VPN tunnel after ${t}s"
+    notify "Proton VPN" "Connect issued but no tunnel after ${t}s. WARP stays parked; use the tray's Rebuild to get it back." network-error
+    return 1
+}
+cmd_off() {
+    detect_driver || true
+    if ! proton_connected; then
+        ok "Proton VPN already disconnected"
+    else
+        say "Proton VPN off  ${D}(driver=${DRIVER:-nm} target=${TARGET:-$NM_ACTIVE})${N}"
+        [ -n "$DRIVER" ] || { DRIVER="nm"; TARGET=$NM_ACTIVE; }
+        drv_disconnect
+        [ "$DRY" -eq 1 ] || wait_for 20 not_connected || { fail "Proton VPN still up — disconnect it in the app, then: proton-fallback off"; return 1; }
+        ok "disconnected"
+        flush_resolver
+    fi
+    unpark_warp
+}
+cmd_status() {
+    detect_driver >/dev/null 2>&1 || true
+    say "Proton VPN fallback"
+    printf '  %-10s %s\n' "driver" "${DRIVER:-none}${TARGET:+  ($TARGET)}"
+    if proton_connected; then printf '  %-10s %s%s%s%s\n' "tunnel" "$G" "connected" "$N" "${NM_ACTIVE:+  $NM_ACTIVE}"
+    else printf '  %-10s %s\n' "tunnel" "disconnected"; fi
+    local ks; ks=$(ks_state)
+    case "$ks" in
+        parked) printf '  %-10s %s%s%s\n' "warp" "$Y" "parked (rebuilds on: proton-fallback off)" "$N" ;;
+        killed) printf '  %-10s %s%s%s\n' "warp" "$R" "torn down by you — stays down" "$N" ;;
+        armed)  printf '  %-10s %s\n' "warp" "$(warp_connected && echo connected || echo "disconnected (armed)")" ;;
+        absent) printf '  %-10s %s\n' "warp" "warp-killswitch not installed" ;;
+    esac
+    [ -r "$CONF" ] && printf '  %-10s %s\n' "config" "$CONF"
+    proton_connected
+}
+cmd_import() {
+    local f="${EXTRA[0]:-}" type name
+    [ -n "$f" ] && [ -r "$f" ] || { fail "import needs a readable file"; return 2; }
+    case "${f##*.}" in conf) type=wireguard ;; ovpn) type=openvpn ;; *) fail "unknown profile type (.conf = WireGuard, .ovpn = OpenVPN)"; return 2 ;; esac
+    name=$(basename "$f"); name=${name%.*}
+    say "Importing $type profile '$name' into NetworkManager"
+    run nmcli connection import type "$type" file "$f" >/dev/null || { fail "import failed"; return 1; }
+    # Never autoconnect: WARP must be parked first, and only `on` does that.
+    run nmcli connection modify "$name" connection.autoconnect no >/dev/null
+    if [ "$KEEP_DNS" -eq 0 ]; then
+        # Proton's profile pushes its own resolver (10.2.0.1). The suite's policy
+        # is systemd-resolved's own DNSSEC/DoT servers over whatever tunnel is up,
+        # so strip it; --keep-dns keeps Proton's resolver (NetShield filtering).
+        run nmcli connection modify "$name" ipv4.dns "" ipv6.dns "" ipv4.ignore-auto-dns yes ipv6.ignore-auto-dns yes >/dev/null
+        ok "DNS left to systemd-resolved (use --keep-dns for Proton's resolver)"
+    fi
+    ok "imported as '$name' (autoconnect off)"
+    echo "  Pin it:  echo 'PROTON_NM_CONNECTION=\"$name\"' >> $CONF"
+}
+
+case "$CMD" in
+    on)      cmd_on ;;
+    off)     cmd_off ;;
+    toggle)  if proton_connected; then cmd_off; else cmd_on; fi ;;
+    status)  cmd_status ;;
+    state)   if proton_connected; then echo connected; exit 0; else echo disconnected; exit 1; fi ;;
+    import)  cmd_import ;;
+    *)       echo "proton-fallback: unknown command: $CMD" >&2; usage >&2; exit 2 ;;
+esac
