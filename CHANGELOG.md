@@ -3,6 +3,29 @@
 All notable changes to Panoptes are recorded here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [3.1.1] — 2026-10-27
+
+Found on the first real run of the endpoint component.
+
+### Fixed
+
+- **The persistence pack's `startup_items` query listed every systemd unit
+  and mount** (728 rows on a laptop): osquery's Linux table folds those in
+  under `type = 'systemd unit'`. Restricted to `type = 'Startup Item'` — XDG
+  autostart entries and init.d scripts — since units are covered by
+  `systemd_units_admin`.
+- **`deleted_binaries` flagged every process whose binary had merely been
+  upgraded** (`systemd-logind`, Xorg, every gvfs helper after an update). A
+  process is listed only when nothing exists at its path any more.
+- **`persistwatch` could still raise single alerts during the install-time
+  inventory**, because osqueryd delivers that first pass in several batches.
+  Rows from a query's first run since osqueryd started (osquery's
+  `counter = 0`) are now folded into one "first pass" summary per batch; a
+  catch-up after a daemon restart reads the same way. Real changes keep their
+  individual alerts; a burst of them is one critical summary.
+- `osquery.conf` no longer sets `logger_plugin`/`logger_path`, which are
+  CLI-only flags osquery warned about; the suite wanted their defaults.
+
 ## [3.1.0] — 2026-10-27
 
 ### Added

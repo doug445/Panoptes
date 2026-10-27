@@ -327,10 +327,23 @@ install_opensnitch() {
         else as_user install -d -m 0755 "$home/.config/autostart"
              printf '%s\n' "$content" | as_user tee "$f" >/dev/null && { ok "$f"; CHANGED=1; }
         fi
-        # start it now for this session if a display is there and it is not running
-        if [ "$DRY" -eq 0 ] && ! as_user pgrep -u "$RUN_USER" -f opensnitch-ui >/dev/null 2>&1; then
-            local disp; disp=$(as_user sh -c 'echo "${DISPLAY:-}"' 2>/dev/null)
-            [ -n "$disp" ] && as_user sh -c 'setsid -f opensnitch-ui >/dev/null 2>&1' && ok "opensnitch-ui started for $RUN_USER"
+        # Start it now for this session if it is not running. Under sudo the
+        # user's DISPLAY is gone (env_reset), so find the session's X display
+        # and bus the way the kill-switch's notifier does.
+        if [ "$DRY" -eq 0 ] && ! pgrep -u "$RUN_USER" -f opensnitch-ui >/dev/null 2>&1; then
+            local uid disp sock
+            uid=$(id -u "$RUN_USER" 2>/dev/null)
+            disp="${DISPLAY:-}"
+            if [ -z "$disp" ]; then
+                for sock in /tmp/.X11-unix/X*; do [ -S "$sock" ] && { disp=":${sock##*/X}"; break; }; done
+            fi
+            if [ -n "$disp" ] && [ -S "/run/user/$uid/bus" ]; then
+                as_user env DISPLAY="$disp" XDG_RUNTIME_DIR="/run/user/$uid" \
+                    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+                    sh -c 'setsid -f opensnitch-ui >/dev/null 2>&1' && ok "opensnitch-ui started for $RUN_USER on $disp"
+            else
+                warn "no graphical session found for $RUN_USER — opensnitch-ui starts at next login"
+            fi
         fi
     fi
     return 0
@@ -403,8 +416,8 @@ write_osquery_pack() {
       "interval": 300, "description": "every cron entry, system and per-user"
     },
     "startup_items": {
-      "query": "SELECT name, path, args, type, source, status, username FROM startup_items;",
-      "interval": 300, "description": "XDG autostart and other login-time items"
+      "query": "SELECT name, path, args, source, status, username FROM startup_items WHERE type = 'Startup Item';",
+      "interval": 300, "description": "XDG autostart entries and init.d scripts (osquery also lists every systemd unit and mount under this table; those are covered by systemd_units_admin)"
     },
     "kernel_modules": {
       "query": "SELECT name, size, used_by, status FROM kernel_modules;",
@@ -427,8 +440,8 @@ write_osquery_pack() {
       "interval": 300, "description": "network-exposed listeners and the process behind each"
     },
     "deleted_binaries": {
-      "query": "SELECT pid, name, path, cmdline, uid FROM processes WHERE on_disk = 0;",
-      "interval": 300, "description": "running processes whose executable was deleted"
+      "query": "SELECT p.pid, p.name, p.path, p.cmdline, p.uid FROM processes p LEFT JOIN file f ON f.path = p.path WHERE p.on_disk = 0 AND p.path != '' AND f.path IS NULL;",
+      "interval": 300, "description": "running processes whose executable is gone from disk (a binary merely replaced by an upgrade still exists at its path and is not listed)"
     },
     "hook_files": {
       "query": "SELECT f.path, f.mtime, h.sha256 FROM file f JOIN hash h USING (path) WHERE f.path IN ('/etc/profile', '/etc/bash.bashrc', '/etc/bashrc', '/etc/zsh/zshrc', '/etc/zshrc', '/etc/ld.so.preload', '/etc/rc.local', '/etc/environment');",
@@ -450,17 +463,16 @@ write_osquery_pack() {
 }
 PACK
 }
+# Only runtime options go in the config: logger_plugin and logger_path are
+# CLI-only flags (osqueryi warns if they are set here), and the suite wants
+# their defaults anyway — the filesystem logger under /var/log/osquery.
 write_osquery_conf() {
     local content
     content=$(cat <<CONF
 {
   "_comment": "$MARK: written by Panoptes endpoint-setup.sh; a copy is kept at $OSQ_CONF_COPY so a hand-edited file is left alone",
   "options": {
-    "logger_path": "$OSQ_LOG_DIR",
-    "logger_plugin": "filesystem",
-    "disable_logging": "false",
-    "schedule_splay_percent": "10",
-    "utc": "true"
+    "schedule_splay_percent": "10"
   },
   "packs": {
     "panoptes-persistence": "$OSQ_PACK"
