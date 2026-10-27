@@ -32,8 +32,8 @@ the machine.** Twenty-three command-line tools. One installer sets it all up,
 including its dependencies, the Proton VPN client and the endpoint pair, on
 Fedora, Debian, Ubuntu, Mint, Arch and openSUSE, on x86_64 and aarch64.
 
-Built and used daily on **Fedora** and a portable **Linux Mint** (MATE) stick;
-exercised on **Manjaro**, **EndeavourOS**, **Debian/Ubuntu** and **Fedora
+Built and used daily on **Fedora** , a portable **Linux Mint** (MATE) stick,
+**Manjaro**, **EndeavourOS**, **Debian/Ubuntu** and **Fedora
 Asahi Remix** (Apple Silicon). Nothing in it is tied to one machine: the
 distribution, package manager, Wi-Fi interface, desktop toolkit and tunnel
 clients are all read at run time. Anything running **systemd-resolved** and
