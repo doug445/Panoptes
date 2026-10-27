@@ -5,6 +5,10 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [3.1.4] — 2026-10-27
+
+netwatch keeps quiet unless an attack is real and sustained.
+
 ### Changed
 
 - **`netwatch` is silent unless an attack is real and sustained.** A busy LAN
@@ -697,6 +701,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[3.1.4]: https://github.com/doug445/Panoptes/releases/tag/v3.1.4
 [3.1.3]: https://github.com/doug445/Panoptes/releases/tag/v3.1.3
 [3.1.2]: https://github.com/doug445/Panoptes/releases/tag/v3.1.2
 [3.1.1]: https://github.com/doug445/Panoptes/releases/tag/v3.1.1
