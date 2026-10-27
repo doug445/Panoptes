@@ -88,7 +88,31 @@ programs. That is the interesting surface:
   `/usr/local/bin`, which precedes `/usr/bin` on `PATH` — including root's
   `secure_path` — so it silently becomes the curl every script on the machine
   gets. Anything that widens that beyond curl, or that leaves the development
-  OpenSSL linkable by other programs, is a finding.
+  OpenSSL linkable by other programs, is a finding. Since 3.0.0 curl is linked
+  statically precisely because a shared `libcurl` in `/usr/local/lib` was
+  found to be loaded by every program on the Debian family.
+* **The passwordless sudoers rules widening.** `install.sh` writes
+  `/etc/sudoers.d/panoptes-dns-toggle` (`dns-toggle`, which takes no
+  arguments) and `warp-killswitch install` writes
+  `/etc/sudoers.d/panoptes-warp-killswitch`, pinned to exactly `down`, `down
+  --keep-dns`, `up`, `heal`, `heal manual`, `status`, `state`, `park` and
+  `unpark`. Both are checked with `visudo -c` before they are installed. A
+  rule with a wildcard, an unpinned argument list, or a target outside a
+  root-owned directory chain is a finding, as is any way for a process running
+  as the user to make the helper do something outside those nine paths.
+* **`proton-setup.sh` trusting the wrong thing.** Proton's signing keys are
+  pinned by fingerprint in the script; on APT the bootstrap must verify the
+  signed `InRelease`, the `Packages` hash and the release package hash before
+  `dpkg` runs, and refuse on any mismatch. A path that installs a package or a
+  repository without that chain, or that accepts a key whose fingerprint
+  differs, is a finding.
+* **`proton-fallback` raising Proton VPN over a live WARP.** The tool must
+  park WARP (or refuse) before it connects; connecting with WARP's daemon
+  running is the wedge the park exists to prevent. Likewise `warp-tray` must
+  refuse `connect` and `up` while Proton VPN is connected.
+* **The trays claiming an action happened.** `dns-tray` and `warp-tray` run
+  their helpers with `sudo -n` and must report a refusal; a success
+  notification for an action that did not run is a finding.
 
 ## What is out of scope
 
@@ -113,6 +137,41 @@ programs. That is the interesting surface:
   4.0.0 (April 2026), the first release with ECH. Flaws
   in that code belong upstream; how Panoptes builds, isolates and installs it
   is in scope.
+
+## Standing rules
+
+These came out of the 3.0.0 audit (see the README) and bind every future
+change:
+
+* **Every `--dry-run` is dry.** A dry run may read, print and create a scratch
+  file; it may not write, rename, restart or replay anything.
+* **Every lock is restored on every exit path.** A tool that removes
+  `chattr +i` installs a trap that puts it back before it does anything else.
+* **No tool deletes a device it did not create.** Physical NICs and bridges
+  are never flushed or removed by a repair rung.
+* **Names from the network and the user are data.** SSIDs, profile names and
+  gateway identities are carried newline-separated or in arrays, never
+  word-split, and never spliced into a command string.
+* **A read-only tool changes nothing**, including resolver caches.
+* **Passwordless rules are pinned and `visudo`-checked**, and the installer
+  names any other rule on the machine that covers the same binary.
+* **Vendor keys are pinned where the vendor publishes a fingerprint**, and
+  the whole chain from key to package is verified before a package manager is
+  handed anything.
+* **Anything a sleep hook or a oneshot unit must finish is handed to a
+  transient unit**, because systemd kills what the hook leaves behind.
+* **Lint stays clean** (`shellcheck -S warning`, `ruff` default ruleset) and
+  CI actions stay pinned to commit SHAs.
+
+Accepted on purpose, with the reasoning here so it survives: the trays can
+tear WARP down, park it and rebuild it without a password (they cannot work
+otherwise; every invocation is pinned, verified, notified and logged);
+Cloudflare's repository key is fetched over HTTPS rather than pinned (no
+published fingerprint; the repository is `signed-by` / `gpgcheck=1`);
+`probesource` interpolates a strictly validated IP literal into its tactic
+strings; `ech-build.sh` builds OpenSSL's ECH branch and curl from upstream
+`git` HEAD; and `proton-fallback`'s `app` driver can only open the window and
+ask you to click when no CLI is present.
 
 ## Before you send diagnostics
 

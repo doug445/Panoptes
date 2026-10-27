@@ -142,8 +142,16 @@ check_arp_spoofing() {
     gateway_mac=$(ip neigh show "$gateway_ip" 2>/dev/null | awk '{print $5; exit}')
     [[ -z "$gateway_mac" ]] && return
 
-    local stored_mac
+    local stored_mac stored_ip
     stored_mac=$(cat "$LOG_DIR/gateway_mac" 2>/dev/null || true)
+    stored_ip=$(cat "$LOG_DIR/gateway_ip" 2>/dev/null || true)
+
+    # A different gateway address is a different network (e.g. an Ethernet move
+    # to another LAN), not a spoofed MAC — start over rather than alarm.
+    if [[ -n "$stored_ip" && "$stored_ip" != "$gateway_ip" ]]; then
+        log_event "ARP gateway changed $stored_ip -> $gateway_ip (re-learning)"
+        stored_mac=""
+    fi
 
     if [[ -z "$stored_mac" ]]; then
         echo "$gateway_mac" > "$LOG_DIR/gateway_mac"
@@ -158,7 +166,8 @@ check_arp_spoofing() {
 
 check_new_network() {
     local current_ssid
-    current_ssid=$(nmcli -t -f active,ssid dev wifi 2>/dev/null | grep '^yes:' | cut -d: -f2- || true)
+    # --rescan no: read NetworkManager's cache, do not trigger a Wi-Fi scan every poll.
+    current_ssid=$(nmcli -t -f active,ssid dev wifi list --rescan no 2>/dev/null | grep '^yes:' | cut -d: -f2- || true)
     local stored_ssid
     stored_ssid=$(cat "$LOG_DIR/current_ssid" 2>/dev/null || true)
 
@@ -180,10 +189,13 @@ check_arp_spoofing
 # ── Main event loop ─────────────────────────────────────────────────────
 # Single-process design: process substitution keeps the while loop in this
 # shell so counters and associative arrays are shared — no subshell isolation.
-exec 3< <(journalctl -k -f --no-pager -o short 2>/dev/null)
+open_journal() { exec 3< <(journalctl -k -f --no-pager -o short 2>/dev/null); }
+open_journal
 
 while true; do
-    if read -r -t "$POLL_INTERVAL" line <&3; then
+    rc=0
+    read -r -t "$POLL_INTERVAL" line <&3 || rc=$?
+    if (( rc == 0 )); then
         if [[ "$line" == *"_DROP"* ]] || [[ "$line" == *"FINAL_REJECT"* ]]; then
             src_ip=$(echo "$line" | grep -oP 'SRC=\K[0-9a-fA-F.:]+' || echo "unknown")
             proto=$(echo "$line" | grep -oP 'PROTO=\K\w+' || echo "?")
@@ -194,13 +206,22 @@ while true; do
                 process_drop "$src_ip" "$proto" "$dpt"
             fi
         fi
+    elif (( rc < 128 )); then
+        # EOF, not a timeout: journalctl went away. Without this the read fails
+        # instantly on every pass and the loop spins at 100% CPU.
+        log_event "WARN journalctl exited (read rc=$rc); re-opening kernel log in ${POLL_INTERVAL}s"
+        exec 3<&-
+        sleep "$POLL_INTERVAL"
+        open_journal
     fi
 
-    # Periodic checks
+    # Periodic checks. The network check must run first: it resets the stored
+    # gateway MAC on an SSID change, so the ARP check does not see the new
+    # network's gateway as a spoofed one (same order as at startup).
     now=$(date +%s)
     if (( now - last_check >= POLL_INTERVAL )); then
-        check_arp_spoofing
         check_new_network
+        check_arp_spoofing
         last_check=$now
     fi
 

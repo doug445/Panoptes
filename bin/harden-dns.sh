@@ -132,6 +132,11 @@ LLMNR=no
 EOF
     was_immutable=0
     if lsattr "$CONF" 2>/dev/null | awk '{print $1}' | grep -q i; then was_immutable=1; fi
+    # set -e (or Ctrl-C) between the chattr -i below and the relock at the end
+    # must not leave the file unlocked: re-apply the bit on every exit path.
+    relock(){ [ "${was_immutable:-0}" -eq 1 ] && [ "$DRY_RUN" -eq 0 ] && chattr +i "$CONF" 2>/dev/null || true; }
+    trap relock EXIT
+    trap 'exit 130' INT TERM
 
     if cmp -s "$desired" "$CONF"; then
       ok "resolved.conf already in desired state"

@@ -106,7 +106,9 @@ if [ -r /etc/os-release ]; then
     # shellcheck disable=SC1091
     . /etc/os-release
     PRETTY="${PRETTY_NAME:-${NAME:-unknown}}"
-    CODENAME="${VERSION_CODENAME:-}"
+    # Derivatives (Mint "zena", Pop, LMDE "faye") must use their base codename:
+    # Cloudflare publishes suites for Ubuntu and Debian releases only.
+    CODENAME="${UBUNTU_CODENAME:-${DEBIAN_CODENAME:-${VERSION_CODENAME:-}}}"
     for c in "${ID:-}" ${ID_LIKE:-}; do
         case "$c" in
             fedora|rhel|centos|rocky|almalinux) FAMILY=fedora; break ;;
@@ -119,14 +121,14 @@ if [ -r /etc/os-release ]; then
 fi
 
 warp_installed()  { command -v warp-cli >/dev/null 2>&1; }
-warp_registered() { warp-cli --accept-tos registration show >/dev/null 2>&1; }
-warp_connected()  { warp-cli --accept-tos status 2>/dev/null | grep -q Connected; }
+warp_registered() { timeout 8 warp-cli --accept-tos registration show >/dev/null 2>&1; }
+warp_connected()  { timeout 8 warp-cli --accept-tos status 2>/dev/null | grep -q Connected; }
 
 report() {
     say "Cloudflare WARP"
     printf '  %-12s %s\n' "system" "$PRETTY ${D}(family=$FAMILY)${N}"
     if warp_installed; then
-        ok "client installed  $(warp-cli --version 2>/dev/null | head -1)"
+        ok "client installed  $(timeout 8 warp-cli --version 2>/dev/null | head -1)"
     else
         warn "client not installed"
         return 0
@@ -134,8 +136,8 @@ report() {
     printf '  %-12s %s\n' "daemon" "$(systemctl is-active warp-svc 2>/dev/null) / $(systemctl is-enabled warp-svc 2>/dev/null)"
     if warp_registered; then ok "device registered"; else warn "not registered — run: $0 --register"; fi
     if warp_connected; then
-        ok "connected  $(warp-cli --accept-tos status 2>/dev/null | head -1)"
-        printf '  %-12s %s\n' "mode" "$(warp-cli --accept-tos settings 2>/dev/null | sed -n 's/.*Mode: //p' | head -1)"
+        ok "connected  $(timeout 8 warp-cli --accept-tos status 2>/dev/null | head -1)"
+        printf '  %-12s %s\n' "mode" "$(timeout 8 warp-cli --accept-tos settings 2>/dev/null | sed -n 's/.*Mode: //p' | head -1)"
     else
         warn "not connected"
     fi
@@ -165,7 +167,7 @@ if [ "$MODE" = uninstall ]; then
         read -r r </dev/tty || r=n
         case "$r" in [yY]*) ;; *) echo "Nothing removed."; exit 1 ;; esac
     fi
-    warp_connected && run warp-cli --accept-tos disconnect >/dev/null 2>&1
+    warp_connected && run timeout 60 warp-cli --accept-tos disconnect >/dev/null 2>&1
     run $SUDO systemctl disable --now warp-svc >/dev/null 2>&1
     case "$FAMILY" in
         fedora) run $SUDO dnf remove -y cloudflare-warp; run $SUDO rm -f "$REPO_RPM" ;;
@@ -184,7 +186,7 @@ fi
 if [ "$MODE" = setmode ]; then
     warp_installed || die "WARP is not installed"
     say "Setting mode to $SET_MODE"
-    run warp-cli --accept-tos mode "$SET_MODE" || die "could not set mode"
+    run timeout 20 warp-cli --accept-tos mode "$SET_MODE" || die "could not set mode"
     ok "mode is now $SET_MODE"
     exit 0
 fi
@@ -244,6 +246,11 @@ REPO
 
 register_and_connect() {
     warp_installed || die "WARP is not installed — run this without --register first"
+    # warp-svc needs a moment to open its IPC socket after enable --now.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        timeout 5 warp-cli --accept-tos status >/dev/null 2>&1 && break
+        sleep 1
+    done
     if warp_registered; then
         ok "device already registered"
     else
@@ -254,15 +261,15 @@ register_and_connect() {
             read -r r </dev/tty || r=n
             case "$r" in [yY]*) ;; *) echo "Not registered."; exit 1 ;; esac
         fi
-        run warp-cli --accept-tos registration new || die "registration failed"
+        run timeout 60 warp-cli --accept-tos registration new || die "registration failed"
         ok "registered"
     fi
 
     say "Setting mode to $WARP_MODE"
-    run warp-cli --accept-tos mode "$WARP_MODE" || warn "could not set mode $WARP_MODE"
+    run timeout 20 warp-cli --accept-tos mode "$WARP_MODE" || warn "could not set mode $WARP_MODE"
 
     say "Connecting"
-    run warp-cli --accept-tos connect || die "connect failed"
+    run timeout 60 warp-cli --accept-tos connect || die "connect failed"
     [ "$DRY" -eq 0 ] && sleep 4
 
     # Bringing the tunnel up kills DNS lookups in flight over the old path, and
@@ -271,10 +278,20 @@ register_and_connect() {
     run resolvectl reset-server-features 2>/dev/null
 }
 
+# The kill-switch service belongs with WARP: without the watchdog and the
+# crash purge, a wedged or dead warp-svc leaves its DROP firewall behind.
+install_killswitch_service() {
+    [ -x /usr/local/bin/warp-killswitch ] || { warn "warp-killswitch not in /usr/local/bin — run Panoptes install.sh, then: sudo warp-killswitch install"; return 0; }
+    say "Kill-switch service (warp-killswitch install)"
+    if [ "$DRY" -eq 1 ]; then printf '  %swould:%s warp-killswitch install%s\n' "$Y" "$N" "${SUDO_USER:+ --user $SUDO_USER}"; return 0; fi
+    # shellcheck disable=SC2086
+    $SUDO /usr/local/bin/warp-killswitch install ${SUDO_USER:+--user "$SUDO_USER"} | sed 's/^/  /'
+}
+
 case "$MODE" in
-    install)  install_client; echo; report ;;
+    install)  install_client; echo; install_killswitch_service; echo; report ;;
     register) register_and_connect; echo; report; echo; verify ;;
-    full)     install_client; echo; register_and_connect; echo; report; echo; verify ;;
+    full)     install_client; echo; register_and_connect; echo; install_killswitch_service; echo; report; echo; verify ;;
 esac
 
 echo

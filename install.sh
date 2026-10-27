@@ -18,9 +18,21 @@
 #        ./install.sh --no-deps    skip the package-dependency check
 #        ./install.sh --deps-only  only resolve dependencies, install no tools
 #   sudo ./install.sh --no-mac-random   skip the Wi-Fi MAC randomization drop-in
+#   sudo ./install.sh --no-proton       skip installing the Proton VPN client
+#   sudo ./install.sh --no-helpers      skip the kill-switch service and sudoers rules
 #
 # Unless --no-deps is given, panoptes-deps.sh runs first: it identifies the
 # distribution and package manager and offers to install whatever is missing.
+# A full install then runs proton-setup.sh, which adds Proton's signed
+# repository and installs the Proton VPN app and CLI (the fallback tunnel
+# proton-fallback and warp-tray drive). It asks before touching the package
+# manager; --no-proton leaves it out.
+#
+# A full install also wires the privileged helpers the trays depend on: a
+# sudoers rule letting the invoking user run dns-toggle without a password, and,
+# when Cloudflare WARP is installed, `warp-killswitch install` (watchdog
+# service, crash purge, sleep hook, NetworkManager guard, pinned sudoers rule).
+# All of it is idempotent; --no-helpers leaves it out.
 
 set -euo pipefail
 
@@ -34,13 +46,13 @@ ICON_DIR="${HOME}/.local/share/icons"
 NM_DIR=/etc/NetworkManager/conf.d
 
 SYS_TOOLS=(netmaster probesource wifi-recover.sh audit-dns.sh harden-dns.sh warp-killswitch dns-toggle
-           panoptes-deps.sh ech-build.sh ech-browsers.sh warp-setup.sh)
-USER_TOOLS=(netcheck netwatch nettop checkdns dns-tray dns-status.sh warp-tray)
+           panoptes-deps.sh ech-build.sh ech-browsers.sh warp-setup.sh proton-setup.sh)
+USER_TOOLS=(netcheck netwatch nettop checkdns dns-tray dns-status.sh warp-tray proton-fallback)
 DNS_SYS=(audit-dns.sh harden-dns.sh dns-toggle)
 DNS_USER=(checkdns dns-status.sh dns-tray)
 ECH_SYS=(panoptes-deps.sh ech-build.sh ech-browsers.sh)
 
-DRY=0; MODE=all; DEPS=1; MACRAND=1
+DRY=0; MODE=all; DEPS=1; MACRAND=1; PROTON=1; HELPERS=1
 for a in "$@"; do
     case "$a" in
         --dry-run)   DRY=1 ;;
@@ -50,6 +62,8 @@ for a in "$@"; do
         --no-deps)   DEPS=0 ;;
         --deps-only) MODE=deps ;;
         --no-mac-random) MACRAND=0 ;;
+        --no-proton) PROTON=0 ;;
+        --no-helpers) HELPERS=0 ;;
         -h|--help)   sed -n '/^# Installs the Panoptes tools/,/^[^#]/p' "$0" \
                          | sed -e '/^[^#]/d' -e 's/^# \?//'; exit 0 ;;
         *) echo "unknown option: $a" >&2; exit 1 ;;
@@ -144,7 +158,7 @@ fi
 # The tray applets load their icons by absolute path from ~/.local/share/icons.
 # Without these the trays start but show nothing, which looks like a crash.
 case "$MODE" in
-    all|user)
+    all|user|dns)
         echo "Tray icons -> $ICON_DIR"
         own=""
         [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && own="$SUDO_USER:$SUDO_USER"
@@ -211,10 +225,76 @@ if [ "$MODE" = all ] && [ "$MACRAND" -eq 1 ]; then
     fi
 fi
 
+# ── Proton VPN client ────────────────────────────────────────────────────
+#
+# The fallback tunnel. proton-setup.sh adds Proton's repository with the
+# signing key pinned by fingerprint, installs the app, the official CLI and
+# the AppIndicator pieces the app's tray icon needs, and is idempotent: on a
+# machine that already has them it reports "unchanged" and exits. It asks
+# before touching the package manager unless the deps step was skipped with
+# --no-deps, in which case it is skipped too (same consent model).
+if [ "$MODE" = all ] && [ "$PROTON" -eq 1 ] && [ "$DEPS" -eq 1 ]; then
+    echo ""
+    if [ -x "$SRC/proton-setup.sh" ]; then
+        proton_args=()
+        [ "$DRY" -eq 1 ] && proton_args+=(--dry-run)
+        "$SRC/proton-setup.sh" "${proton_args[@]+"${proton_args[@]}"}" || \
+            echo "  (Proton VPN not installed — proton-fallback and the tray's ProtonVPN items stay inert until it is)"
+    else
+        echo "proton-setup.sh not found in bin/; skipping the Proton VPN client" >&2
+    fi
+fi
+
+# ── Privileged helpers: sudoers for the trays, the kill-switch service ────
+if [ "$MODE" = all ] && [ "$HELPERS" -eq 1 ]; then
+    echo ""
+    echo "Privileged helpers"
+    tray_user="${SUDO_USER:-}"; [ "$tray_user" = root ] && tray_user=""
+    if [ -n "$tray_user" ]; then
+        # dns-toggle takes no arguments, so the rule is already as narrow as it gets.
+        rule="$tray_user ALL=(root) NOPASSWD: $SYS_DIR/dns-toggle"
+        sudoers_file=/etc/sudoers.d/panoptes-dns-toggle
+        if [ "$DRY" -eq 1 ]; then
+            echo "  would write $sudoers_file: $rule"
+        elif [ -f "$sudoers_file" ] && [ "$(tail -n 1 "$sudoers_file")" = "$rule" ]; then
+            echo "  = $sudoers_file (unchanged)"
+        else
+            tmp=$(mktemp)
+            printf '# Installed by Panoptes install.sh: dns-tray flips the resolver without a password.\n%s\n' "$rule" > "$tmp"
+            if visudo -cf "$tmp" >/dev/null 2>&1; then
+                install -m 0440 "$tmp" "$sudoers_file" && echo "  + $sudoers_file"
+            else
+                echo "  ! sudoers rule failed visudo -c; not installed" >&2
+            fi
+            rm -f "$tmp"
+        fi
+    else
+        echo "  (no invoking user known — run with sudo from your account to get the tray sudoers rules)"
+    fi
+    if command -v warp-cli >/dev/null 2>&1 && [ -x "$SYS_DIR/warp-killswitch" ]; then
+        if [ "$DRY" -eq 1 ]; then
+            echo "  would run: $SYS_DIR/warp-killswitch install${tray_user:+ --user $tray_user}"
+        else
+            # shellcheck disable=SC2086
+            "$SYS_DIR/warp-killswitch" install ${tray_user:+--user "$tray_user"} | sed 's/^/  /'
+        fi
+    else
+        echo "  Cloudflare WARP is not installed: kill-switch service skipped (warp-setup.sh installs both)"
+    fi
+fi
+
 echo ""
-echo "Done. Nothing was enabled as a service."
+if [ "$MODE" = all ] && [ "$HELPERS" -eq 1 ] && command -v warp-cli >/dev/null 2>&1; then
+    echo "Done. The only service enabled is warp-watchdog (the WARP kill-switch monitor)."
+else
+    echo "Done. Nothing was enabled as a service."
+fi
 echo "Start here:  checkdns   |   sudo audit-dns.sh   |   netcheck"
-case ":$PATH:" in
-    *":$USER_DIR:"*) ;;
-    *) echo ""; echo "Note: $USER_DIR is not on your PATH." ;;
-esac
+# Under sudo $PATH is root's secure_path, which says nothing about the invoking
+# user's shell; only check when we are actually that user.
+if [ -z "${SUDO_USER:-}" ]; then
+    case ":$PATH:" in
+        *":$USER_DIR:"*) ;;
+        *) echo ""; echo "Note: $USER_DIR is not on your PATH." ;;
+    esac
+fi
