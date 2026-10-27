@@ -340,7 +340,7 @@ session_env() {
     local u=$1 p e pass
     for pass in desktop any; do
         for p in $(pgrep -u "$u" -f '/(warp|dns)-tray( |$)') $(pgrep -u "$u"); do
-            e="$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null \
+            e="$(tr '\0' '\n' 2>/dev/null < "/proc/$p/environ" \
                  | grep -E '^(DISPLAY|WAYLAND_DISPLAY|XAUTHORITY|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|XDG_CURRENT_DESKTOP|XDG_SESSION_DESKTOP|XDG_SESSION_TYPE|XDG_DATA_DIRS|KDE_FULL_SESSION)=')" || continue
             grep -qE '^(DISPLAY|WAYLAND_DISPLAY)=' <<<"$e" || continue
             grep -q '^DBUS_SESSION_BUS_ADDRESS=' <<<"$e" || continue
@@ -382,10 +382,24 @@ case "$MODE" in
                 pkill -u "$tray_user" -f '/(warp|dns)-tray( |$)' 2>/dev/null || true
                 sleep 1
                 mapfile -t session <<<"$env_lines"
+                # Start them in the user's own systemd manager, not in this sudo
+                # session. polkit lets only an active desktop session control
+                # NetworkManager, and a tray left in root's sudo scope cannot
+                # drop Proton VPN: "Not authorized to deactivate connections".
+                # The trays fork once and the parent exits, hence Type=forking.
+                um=(); [ "$(id -u)" -eq 0 ] && um=(--machine="$tray_user@.host")
+                setenv=(); for kv in "${session[@]}"; do setenv+=(--setenv="$kv"); done
                 as_user=(); [ "$(id -u)" -eq 0 ] && as_user=(runuser -u "$tray_user" --)
                 for t in "${trays[@]}"; do
-                    "${as_user[@]}" env "${session[@]}" setsid -f "$USER_DIR/$t" \
-                        >/dev/null 2>&1 </dev/null && echo "  started $t"
+                    systemctl --user "${um[@]}" stop "panoptes-$t.service" >/dev/null 2>&1 || true
+                    if systemd-run --user "${um[@]}" --quiet --collect --unit="panoptes-$t" \
+                           -p Type=forking "${setenv[@]}" "$USER_DIR/$t" >/dev/null 2>&1; then
+                        echo "  started $t"
+                    elif "${as_user[@]}" env "${session[@]}" setsid -f "$USER_DIR/$t" \
+                           >/dev/null 2>&1 </dev/null; then
+                        # No systemd user manager to start it in.
+                        echo "  started $t (outside your desktop session: log out and in before using its Proton VPN items)"
+                    fi
                 done
             fi
         fi ;;
