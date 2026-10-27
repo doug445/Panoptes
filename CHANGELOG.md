@@ -5,6 +5,10 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [3.1.5] — 2026-10-27
+
+The trays come back after an install on Plasma Wayland.
+
 ### Fixed
 
 - **The trays vanished after `install.sh` restarted them on Plasma Wayland.**
@@ -15,6 +19,13 @@ This project follows [Semantic Versioning](https://semver.org/).
   `XDG_CURRENT_DESKTOP`, `XDG_SESSION_DESKTOP`, `XDG_SESSION_TYPE`,
   `XDG_DATA_DIRS` and `KDE_FULL_SESSION`, and prefers a process that has a
   desktop set, so a tray started without one cannot hand on its environment.
+
+### Repository
+
+- **History rewritten to correct commit author metadata.** Every commit and
+  tag hash changed; no file content did — each tag's tree is byte-identical
+  to before. An existing clone should resync rather than pull:
+  `git fetch --force --tags origin && git reset --hard origin/main`.
 
 ## [3.1.4] — 2026-10-27
 
@@ -712,6 +723,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[3.1.5]: https://github.com/doug445/Panoptes/releases/tag/v3.1.5
 [3.1.4]: https://github.com/doug445/Panoptes/releases/tag/v3.1.4
 [3.1.3]: https://github.com/doug445/Panoptes/releases/tag/v3.1.3
 [3.1.2]: https://github.com/doug445/Panoptes/releases/tag/v3.1.2
