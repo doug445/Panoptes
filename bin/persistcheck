@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+#
+# Panoptes — the all-seeing network watch
+# https://github.com/doug445/Panoptes
+#
+# Copyright (c) 2026 William MacKinnon <spilled-bowline0j@icloud.com>
+# SPDX-License-Identifier: MIT
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+# persistcheck — the KnockKnock half of the endpoint component. Lists
+# everything persistent or exposed on this machine right now — the same
+# queries persistwatch watches — and what changed since you last looked.
+#
+# Reads the queries from the pack endpoint-setup.sh installed, so the two
+# never drift: /etc/osquery/packs/panoptes-persistence.conf. Runs them with
+# osqueryi, through `sudo -n` when that works (cron, authorized keys and
+# sudoers need root to be complete) and says so when it does not. Read-only:
+# the only thing it writes is its own snapshot under ~/.local/state/panoptes.
+#
+# Usage:
+#   persistcheck               everything, with +/- against the last snapshot
+#   persistcheck --diff        only what changed since the last snapshot
+#   persistcheck --baseline    take a fresh snapshot, print nothing but the counts
+#   persistcheck --json        raw rows as JSON (no snapshot update)
+#   persistcheck --no-save     do not update the snapshot
+#   persistcheck QUERY...      only these pack queries (e.g. crontab sudoers)
+# Exit: 0 nothing changed, 1 something changed, 2 osquery or the pack is missing.
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+PACK = '/etc/osquery/packs/panoptes-persistence.conf'
+STATE_DIR = os.path.join(os.environ.get('XDG_STATE_HOME', os.path.expanduser('~/.local/state')), 'panoptes')
+SNAPSHOT = os.path.join(STATE_DIR, 'persistcheck.json')
+ORDER = ['systemd_units_admin', 'crontab', 'startup_items', 'kernel_modules',
+         'authorized_keys', 'sudoers', 'suid_bin', 'listening_ports', 'deleted_binaries',
+         'hook_files', 'hook_dirs', 'user_hooks', 'users']
+KEY_COLS = {
+    'systemd_units_admin': ['id', 'active_state', 'sub_state', 'fragment_path'],
+    'crontab': ['path', 'minute', 'hour', 'day_of_month', 'month', 'day_of_week', 'command'],
+    'startup_items': ['name', 'path', 'args', 'source', 'username'],
+    'kernel_modules': ['name', 'used_by'],
+    'authorized_keys': ['username', 'algorithm', 'comment', 'key_file'],
+    'sudoers': ['source', 'header', 'rule_details'],
+    'suid_bin': ['path', 'username', 'groupname', 'permissions'],
+    'listening_ports': ['protocol', 'address', 'port', 'name', 'path'],
+    'deleted_binaries': ['pid', 'uid', 'name', 'path', 'cmdline'],
+    'hook_files': ['path', 'sha256'],
+    'hook_dirs': ['path', 'sha256'],
+    'user_hooks': ['path', 'sha256'],
+    'users': ['uid', 'username', 'shell', 'directory'],
+}
+# columns that change on their own and must not count as a difference
+VOLATILE = {'kernel_modules': {'size', 'used_by'}, 'listening_ports': {'pid', 'cmdline'},
+            'deleted_binaries': {'pid', 'cmdline'}, 'hook_files': {'mtime'}, 'hook_dirs': {'mtime'},
+            'user_hooks': {'mtime'}, 'systemd_units_admin': {'description'}}
+
+tty = sys.stdout.isatty()
+B, G, R, Y, D, N = ('\033[1m', '\033[0;32m', '\033[0;31m', '\033[0;33m', '\033[0;90m', '\033[0m') if tty else ('',) * 6
+
+
+def osqueryi():
+    exe = shutil.which('osqueryi')
+    if not exe:
+        return None, False
+    if os.geteuid() == 0:
+        return [exe], True
+    try:
+        if subprocess.run(['sudo', '-n', 'true'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          check=False, timeout=10).returncode == 0:
+            return ['sudo', '-n', exe], True
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return [exe], False
+
+
+def run_query(base, sql):
+    try:
+        res = subprocess.run(base + ['--json', sql], capture_output=True, text=True, check=False, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, str(e)
+    if res.returncode != 0:
+        return None, res.stderr.strip().splitlines()[-1] if res.stderr.strip() else f'exit {res.returncode}'
+    try:
+        return json.loads(res.stdout or '[]'), None
+    except ValueError as e:
+        return None, f'bad JSON from osqueryi: {e}'
+
+
+def stable_key(query, row):
+    vol = VOLATILE.get(query, set())
+    return json.dumps({k: v for k, v in sorted(row.items()) if k not in vol}, sort_keys=True)
+
+
+def fmt(query, row):
+    cols = KEY_COLS.get(query) or sorted(row)
+    parts = []
+    for c in cols:
+        v = row.get(c, '')
+        if v in ('', None):
+            continue
+        if c == 'sha256':
+            v = str(v)[:12] + '…'
+        parts.append(f'{D}{c}={N}{v}')
+    return '  '.join(parts)
+
+
+def main(argv):
+    want_json = '--json' in argv
+    diff_only = '--diff' in argv
+    baseline = '--baseline' in argv
+    save = '--no-save' not in argv and not want_json
+    names = [a for a in argv if not a.startswith('--')]
+    try:
+        with open(PACK) as fh:
+            pack = json.load(fh)
+    except (OSError, ValueError) as e:
+        print(f'persistcheck: cannot read the persistence pack at {PACK} ({e}).\n'
+              f'  Install the endpoint component: sudo endpoint-setup.sh', file=sys.stderr)
+        return 2
+    queries = pack.get('queries', {})
+    base, privileged = osqueryi()
+    if base is None:
+        print('persistcheck: osqueryi is not installed. Install the endpoint component: sudo endpoint-setup.sh',
+              file=sys.stderr)
+        return 2
+    order = [q for q in ORDER if q in queries] + sorted(q for q in queries if q not in ORDER)
+    if names:
+        unknown = [n for n in names if n not in queries]
+        if unknown:
+            print(f'persistcheck: unknown query: {" ".join(unknown)} (have: {" ".join(order)})', file=sys.stderr)
+            return 2
+        order = [q for q in order if q in names]
+
+    try:
+        with open(SNAPSHOT) as fh:
+            old = json.load(fh)
+    except (OSError, ValueError):
+        old = {}
+
+    results, errors = {}, {}
+    for q in order:
+        rows, err = run_query(base, queries[q]['query'])
+        if err:
+            errors[q] = err
+        results[q] = rows or []
+
+    if want_json:
+        json.dump({'privileged': privileged, 'results': results, 'errors': errors}, sys.stdout, indent=1)
+        print()
+        return 0
+
+    changed = 0
+    new_snapshot = {}
+    print(f"{B}persistcheck{N} — {os.uname().nodename}  "
+          f"{'as root' if privileged else D + 'unprivileged: cron, SSH keys and sudoers are incomplete; run with sudo' + N}")
+    if not old:
+        print(f'{D}no previous snapshot: everything below is new to persistcheck, nothing is marked{N}')
+    for q in order:
+        rows = results[q]
+        keys = {stable_key(q, r): r for r in rows}
+        new_snapshot[q] = sorted(keys)
+        prev = set(old.get(q, [])) if old else set(keys)
+        added = [keys[k] for k in keys if k not in prev]
+        gone = [json.loads(k) for k in prev if k not in keys]
+        changed += len(added) + len(gone)
+        desc = queries[q].get('description', '')
+        if baseline:
+            continue
+        if diff_only and not added and not gone and q not in errors:
+            continue
+        marker = f'  {Y}{len(added)} new, {len(gone)} gone{N}' if (added or gone) else ''
+        print(f"\n{B}{q}{N}  {D}{desc}{N}  ({len(rows)}){marker}")
+        if q in errors:
+            print(f'  {R}! {errors[q]}{N}')
+        shown = set()
+        for r in added:
+            print(f'  {G}+{N} {fmt(q, r)}')
+            shown.add(stable_key(q, r))
+        for r in gone:
+            print(f'  {R}-{N} {fmt(q, r)}')
+        if not diff_only:
+            for r in rows:
+                if stable_key(q, r) not in shown:
+                    print(f'    {fmt(q, r)}')
+    if baseline:
+        print(' '.join(f'{q}={len(results[q])}' for q in order))
+    if save or baseline:
+        try:
+            os.makedirs(STATE_DIR, exist_ok=True)
+            with open(SNAPSHOT, 'w') as fh:
+                json.dump(new_snapshot, fh)
+        except OSError as e:
+            print(f'{Y}could not save the snapshot: {e}{N}', file=sys.stderr)
+    if old and not baseline:
+        print(f"\n{(Y if changed else G)}{changed} change(s) since the last snapshot{N}"
+              f"{'' if save else D + ' (snapshot not updated)' + N}")
+    return 1 if (old and changed) else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

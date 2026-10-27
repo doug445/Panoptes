@@ -40,7 +40,7 @@
 #        ./panoptes-deps.sh --list         show the full requirement table
 #        ./panoptes-deps.sh --dry-run      resolve and report, run no package manager
 #
-# Groups: core dns firewall investigate tray build warp proton
+# Groups: core dns firewall investigate tray build warp proton endpoint
 # Optional requirements are skipped unless --with-optional is given.
 
 set -uo pipefail
@@ -113,10 +113,12 @@ psl-dev|pc:libpsl|build|no|libpsl-devel|libpsl-dev|libpsl|libpsl-devel|libpsl-de
 warp-cli|cmd:warp-cli|warp|yes|-|-|-|-|-
 protonvpn-app|cmd:protonvpn-app|proton|yes|-|-|-|-|-
 protonvpn-cli|cmd:protonvpn|proton|yes|-|-|-|-|-
+opensnitch|cmd:opensnitchd|endpoint|yes|-|opensnitch|opensnitch|-|-
+osquery|cmd:osqueryi|endpoint|yes|-|-|osquery|-|-
 TABLE
 )
 
-ALL_GROUPS="core dns firewall investigate tray build warp proton"
+ALL_GROUPS="core dns firewall investigate tray build warp proton endpoint"
 
 # ------------------------------------------------------------------- arguments
 CHECK_ONLY=0; ASSUME_YES=0; DRY=0; PRINT_ONLY=0; LIST=0; WITH_OPTIONAL=0
@@ -258,6 +260,9 @@ while IFS='|' read -r id probe group opt fed deb arc sus alp; do
             protonvpn-app|protonvpn-cli)
                 printf '  %s!%s %-14s %sno distro packages Proton VPN — run: proton-setup.sh%s\n' \
                     "$Y" "$N" "$id" "$Y" "$N" ;;
+            opensnitch|osquery)
+                printf '  %s!%s %-14s %snot in %s repositories — run: endpoint-setup.sh (signed upstream/vendor source)%s\n' \
+                    "$Y" "$N" "$id" "$Y" "$FAMILY" "$N" ;;
             *)
                 printf '  %s!%s %-14s %snot packaged for %s — install it yourself%s\n' \
                     "$Y" "$N" "$id" "$Y" "$FAMILY" "$N" ;;

@@ -17,17 +17,20 @@ network intrusion detection for Linux. The all-seeing network watch.
 [![Shell: bash 4 + python3](https://img.shields.io/badge/shell-bash%204%20%2B%20python3-4EAA25.svg)](#notes-and-caveats)
 [![DNS: AdGuard DoT | Quad9 | Cloudflare](https://img.shields.io/badge/DNS-AdGuard%20DoT%20%7C%20Quad9%20%7C%20Cloudflare-blue.svg)](#dns--auditing-hardening-leak-prevention)
 [![Tunnel: Cloudflare WARP + Proton VPN](https://img.shields.io/badge/tunnel-Cloudflare%20WARP%20%2B%20Proton%20VPN-F38020.svg)](#tunnel--cloudflare-warp-that-can-never-blackhole-the-machine-with-proton-vpn-behind-it)
+[![Endpoint: OpenSnitch + osquery](https://img.shields.io/badge/endpoint-OpenSnitch%20%2B%20osquery-8e44ad.svg)](#endpoint--outbound-firewall-and-persistence-watch)
 
 **A Linux network security suite: encrypted, filtered DNS (AdGuard over DoT
 with DNSSEC, Quad9 and Cloudflare behind it), Encrypted Client Hello in every
 browser that can do it, a Cloudflare WARP tunnel with a verified kill-switch
 and self-healing watchdog, Proton VPN as the fallback tunnel with WARP parked
 safely underneath it, a two-icon system-tray control for the resolver and the
-tunnels, and monitors that watch firewalld drops and the ARP table for port
-scans and spoofed gateways — plus deep investigation of any address that
-touches the machine.** Twenty command-line tools. One installer sets it all up,
-including its dependencies and the Proton VPN client, on Fedora, Debian,
-Ubuntu, Mint, Arch, openSUSE and Alpine.
+tunnels, monitors that watch firewalld drops and the ARP table for port scans
+and spoofed gateways, an outbound application firewall (OpenSnitch) and a
+persistence watch (osquery) that lists what runs at boot or login and tells
+you when that changes — plus deep investigation of any address that touches
+the machine.** Twenty-three command-line tools. One installer sets it all up,
+including its dependencies, the Proton VPN client and the endpoint pair, on
+Fedora, Debian, Ubuntu, Mint, Arch and openSUSE, on x86_64 and aarch64.
 
 Built and used daily on **Fedora** and a portable **Linux Mint** (MATE) stick;
 exercised on **Manjaro**, **EndeavourOS**, **Debian/Ubuntu** and **Fedora
@@ -158,11 +161,13 @@ netcheck              # interfaces, Wi-Fi band/bitrate, firewall, listening port
 ech-browsers.sh       # turn on Encrypted Client Hello in every browser you have
 sudo warp-setup.sh    # Cloudflare WARP: repository, client, registration, kill-switch service
 proton-fallback on    # park WARP and bring Proton VPN up instead (sign in once first)
+persistcheck          # everything persistent or exposed right now, and what changed since last time
 ```
 
 The installer copies tools, installs dependencies after asking, installs the
-Proton VPN client after asking, and wires the two tray helpers. The only
-service it enables is the WARP watchdog, and only when WARP is installed.
+Proton VPN client and the endpoint pair (OpenSnitch, osquery) after asking,
+and wires the two tray helpers. The services it enables are the WARP watchdog
+(only when WARP is installed), `opensnitch`, `osqueryd` and `persistwatch`.
 `audit-dns.sh`, `netcheck`, `nettop`, `checkdns` and `dns-status.sh` are
 strictly read-only.
 
@@ -303,6 +308,30 @@ action did not run instead of pretending it did.
 | **`nettop`** | Lists hosts on the LAN and WAN with vendor attribution — active `arp-scan` for the LAN, falling back to `ip neigh` plus OUI lookup, with `whois` filling in vendor for public addresses. |
 | **`netcheck`** | Read-only network status readout: every interface, Wi-Fi SSID, band, channel, frequency, protocol and bitrate for each adapter, MAC randomization state, firewall state, listening ports with the owning process, WARP state with an exit check, live DNSSEC and DoT verification, and cached `whois` for public addresses (private ranges are skipped). |
 
+### Endpoint — outbound firewall and persistence watch
+
+The Linux counterpart of the macOS suite's Objective-See component: LuLu,
+KnockKnock and BlockBlock, rebuilt on two open-source tools that run on
+x86_64 and aarch64 alike.
+
+| Tool | What it does |
+|------|--------------|
+| **OpenSnitch** (installed by `endpoint-setup.sh`) | An outbound **application firewall**, the LuLu role: every program's first connection to a new destination raises a prompt, and the rule you choose is kept. firewalld and the kill-switch only cover inbound and the tunnel; this is what covers *outbound*. From the distribution on the Debian, Ubuntu and Arch families; on Fedora and openSUSE, which package neither it nor its UI, from upstream's GitHub release, verified against the maintainer's **signed** `readme.txt` (pinned key, SHA-512 per package). `endpoint-setup.sh` seeds *allow* rules for the suite's own traffic — `systemd-resolved`, NetworkManager, `warp-svc`, and the kill-switch watchdog's raw-IP pings and portal checks, pinned to their destinations — so a rebuild is never left waiting on a dialog, and starts the prompt UI with your session. |
+| **osquery** (installed by `endpoint-setup.sh`) | The operating system as SQL tables, from osquery's own repository with the signing key **pinned by fingerprint** (one key serves APT, dnf and zypper). The suite ships a **persistence pack**: systemd units outside the distribution's directories, cron, autostart items, kernel modules, `ld.so.preload`, SSH authorized keys, sudoers rules, setuid binaries, network-exposed listeners with the process behind each, processes whose binary was deleted, the hashes of the system and per-user shell, dispatcher and drop-in hook files, and accounts. Your own `osquery.conf` is never overwritten: the suite keeps a copy of what it wrote and leaves an edited file alone. |
+| **`persistcheck`** | The KnockKnock role, on demand: runs the pack's queries through `osqueryi` (via `sudo -n` when it can, so cron, keys and sudoers are complete) and prints everything, with `+`/`-` against the snapshot it took last time, so "what changed since I last looked" is one command. `--diff` for changes only, `--json` for the rows, `--baseline` to reset. Reads the installed pack, so it can never drift from what the watch watches. |
+| **`persistwatch`** | The BlockBlock role, live: a root service that follows `osqueryd`'s results log and raises a desktop notification to every graphical session when the pack reports a new row — a new unit, cron entry, autostart item, module, key, sudoers rule, listener, deleted-binary process or changed hook file. Keeps its place across restarts and rotation; collapses a burst (the first pass after install lists everything that already exists) into one summary instead of a hundred dialogs. |
+
+`endpoint-setup.sh` is idempotent (`--check`, `--dry-run`, `--yes`,
+`--no-opensnitch`, `--no-osquery`), and `--uninstall` removes the suite's
+rules, pack, config and service while leaving the two packages in place; add
+`--purge` to remove those too. A full `install.sh` runs it; `--no-endpoint`
+leaves it out.
+
+OpenSnitch will ask about the suite's own probes — `nmap`, `arp-scan`,
+`tcpdump`, `curl` to anything but the watchdog's three check URLs — once
+each; allow them. Without its UI running, the daemon falls back to its default
+action, which is *allow*: nothing breaks, you simply are not asked.
+
 ### TLS — Encrypted Client Hello
 
 ECH encrypts the server name in the TLS handshake. Without it, every site you
@@ -390,6 +419,8 @@ hardening is what is preventing you from ever seeing the login page.
 | Verifies DNSSEC + DoT + ECH end to end | **yes** | partial | manually | no |
 | Survives WARP's lockdown firewall with a dead tunnel | **yes** — verified teardown, rebuild, watchdog | no | no | no |
 | Switches between WARP and Proton VPN safely | **yes** | no | no | no |
+| Blocks outbound connections you have not approved | **yes** — OpenSnitch, per application | no | no | no |
+| Lists what runs at boot or login, and alerts when that changes | **yes** — osquery pack, `persistcheck`, `persistwatch` | no | no | no |
 | Investigates an unknown source IP | **yes**, 11 tactics | no | packet-level only | no |
 | Watches firewall drops + ARP anomalies | **yes** | no | yes, manually | logs only |
 | Recovers a broken Wi-Fi link | **yes** | no | no | no |
@@ -422,6 +453,7 @@ sudo ./install.sh --ech-only   # just the ECH tools
 sudo ./install.sh --deps-only  # only resolve dependencies, install no tools
 sudo ./install.sh --no-deps    # skip the dependency check (and the Proton VPN install)
 sudo ./install.sh --no-proton  # skip installing the Proton VPN client
+sudo ./install.sh --no-endpoint   # skip OpenSnitch, osquery and the persistence watch
 sudo ./install.sh --no-helpers # skip the sudoers rules and the kill-switch service
 sudo ./install.sh --no-mac-random   # skip the Wi-Fi MAC randomization drop-in
 ./install.sh --user            # user tools only, no sudo, into ~/.local/bin
@@ -491,13 +523,15 @@ tactic, it does not break the run.
 
 | Required | Optional (per tactic) |
 |---|---|
-| `bash` 4+, `systemd-resolved`, `iproute2`, NetworkManager, `python3` + PyGObject + GTK 3 (trays) | `arp-scan`, `whois`, `tcpdump`, `tshark`, `p0f`, `conntrack`, `ipset`, `dig` (bind-utils), `firewalld`, libxapp (XApp tray icons), PyQt6 (KDE trays), `warp-cli`, Proton VPN |
+| `bash` 4+, `systemd-resolved`, `iproute2`, NetworkManager, `python3` + PyGObject + GTK 3 (trays) | `arp-scan`, `whois`, `tcpdump`, `tshark`, `p0f`, `conntrack`, `ipset`, `dig` (bind-utils), `firewalld`, libxapp (XApp tray icons), PyQt6 (KDE trays), `warp-cli`, Proton VPN, OpenSnitch, osquery |
 
-Two requirements no distribution ships. `warp-setup.sh` adds Cloudflare's
-repository and installs `warp-cli`; `proton-setup.sh` adds Proton's and
-installs the Proton VPN app and CLI. A full `install.sh` runs the second for
-you, after asking; the first is yours to run, because it registers a device
-with Cloudflare.
+Four requirements come from outside the distribution. `warp-setup.sh` adds
+Cloudflare's repository and installs `warp-cli`; `proton-setup.sh` adds
+Proton's and installs the Proton VPN app and CLI; `endpoint-setup.sh` adds
+osquery's repository and, where the distribution does not package it,
+installs OpenSnitch from upstream's signed release. A full `install.sh` runs
+the last two for you, after asking; the first is yours to run, because it
+registers a device with Cloudflare.
 
 **AdGuard needs no installation.** It is a public resolver
 (`94.140.14.14` / `94.140.15.15` over DoT), not software — `harden-dns.sh` and
@@ -512,8 +546,8 @@ touching your system.
 
 | Path | From |
 |---|---|
-| `/usr/local/bin/{netmaster,probesource,wifi-recover.sh,audit-dns.sh,harden-dns.sh,warp-killswitch,dns-toggle,panoptes-deps.sh,ech-build.sh,ech-browsers.sh,warp-setup.sh,proton-setup.sh}` | system tools |
-| `~/.local/bin/{netcheck,netwatch,nettop,checkdns,dns-tray,dns-status.sh,warp-tray,proton-fallback}` | user tools |
+| `/usr/local/bin/{netmaster,probesource,wifi-recover.sh,audit-dns.sh,harden-dns.sh,warp-killswitch,dns-toggle,panoptes-deps.sh,ech-build.sh,ech-browsers.sh,warp-setup.sh,proton-setup.sh,endpoint-setup.sh,persistwatch}` | system tools |
+| `~/.local/bin/{netcheck,netwatch,nettop,checkdns,dns-tray,dns-status.sh,warp-tray,proton-fallback,persistcheck}` | user tools |
 | `~/.local/share/icons/{adguard-green,cloudflare-shield,warp-green,warp-red,warp-parked,proton-yellow}.svg` | tray icons |
 | `/etc/NetworkManager/conf.d/mac-randomization.conf` | full install, unless `--no-mac-random` or a Broadcom driver that cannot clone |
 | `/etc/sudoers.d/panoptes-dns-toggle` — the invoking user may run `dns-toggle` without a password (it takes no arguments) | full install, unless `--no-helpers` |
@@ -521,7 +555,11 @@ touching your system.
 | `/etc/systemd/system/warp-watchdog.service`, `/etc/systemd/system/warp-svc.service.d/50-warp-killswitch.conf`, `/usr/lib/systemd/system-sleep/warp-killswitch`, `/etc/NetworkManager/conf.d/{99-warp-unmanaged,20-connectivity-disable}.conf` | `warp-killswitch install` |
 | `/etc/apt/sources.list.d/protonvpn-stable.sources` + `/usr/share/keyrings/protonvpn-stable-archive-keyring.gpg`, or `/etc/yum.repos.d/protonvpn-stable.repo`, owned by Proton's own `protonvpn-stable-release` package | `proton-setup.sh` |
 | `~/.config/panoptes/proton.conf` — optional: `PROTON_DRIVER`, `PROTON_NM_CONNECTION`, `PROTON_WG_CONF`, `PROTON_APP_CMD`, `PROTON_CONNECT_ARGS`, `PROTON_TIMEOUT` | you |
-| State / logs: `/var/lib/warp-killswitch/{killed,parked}`, `/var/log/warp-killswitch.log`, `~/.local/share/netwatch/`, `~/.local/share/probesource/` | |
+| `/etc/opensnitchd/rules/000-panoptes-managed-*.json` — the suite's allow rules; everything else in that directory is yours. `~/.config/autostart/opensnitch_ui.desktop` where the package ships no autostart entry | `endpoint-setup.sh` |
+| `/etc/apt/keyrings/osquery.asc` + `/etc/apt/sources.list.d/osquery.list`, or `/etc/pki/rpm-gpg/RPM-GPG-KEY-osquery` + `/etc/yum.repos.d/osquery-s3-rpm.repo` | `endpoint-setup.sh` |
+| `/etc/osquery/packs/panoptes-persistence.conf`, and `/etc/osquery/osquery.conf` only if none existed (a copy at `/etc/osquery/.osquery.conf.panoptes` tells the suite's file from yours) | `endpoint-setup.sh` |
+| `/etc/systemd/system/persistwatch.service` | `endpoint-setup.sh` |
+| State / logs: `/var/lib/warp-killswitch/{killed,parked}`, `/var/log/warp-killswitch.log`, `/var/log/osquery/osqueryd.results.log`, `/var/lib/persistwatch/position`, `/var/log/persistwatch.log`, `~/.local/state/panoptes/persistcheck.json`, `~/.local/share/netwatch/`, `~/.local/share/probesource/` | |
 
 ---
 
@@ -631,6 +669,17 @@ Its root helper needs a passwordless `sudo` rule and the tray found none. A
 full `sudo ./install.sh` writes both rules for the user who ran it; see [What
 gets installed where](#what-gets-installed-where) for exactly what they permit.
 
+### Is there anything like LuLu, KnockKnock and BlockBlock for Linux?
+
+That is the endpoint component. OpenSnitch is the LuLu: a per-application
+outbound firewall with prompts. osquery with the suite's persistence pack
+gives you the other two: `persistcheck` lists everything persistent or
+exposed and what changed since you last ran it (KnockKnock), and
+`persistwatch` raises a notification the moment a new unit, cron entry,
+autostart item, module, SSH key, sudoers rule, listener or changed hook file
+appears (BlockBlock). `sudo endpoint-setup.sh` installs all of it; a full
+`install.sh` already did.
+
 ### Something is probing my machine. How do I find out who?
 
 `probesource`. Pick the address from your firewall journal or the live socket
@@ -688,8 +737,9 @@ worth reporting.
 ### Is any of this safe to run on a production machine?
 
 `audit-dns.sh`, `netcheck`, `nettop`, `checkdns`, `dns-status.sh`,
-`proton-fallback status` and `wifi-recover.sh` (without `--repair`) make **no
-changes at all**. Everything that writes says so; `harden-dns.sh`,
+`proton-fallback status`, `persistcheck` (it writes only its own snapshot
+under `~/.local/state`) and `wifi-recover.sh` (without `--repair`) make **no
+changes to the system**. Everything that writes says so; `harden-dns.sh`,
 `ech-browsers.sh`, `warp-setup.sh`, `proton-setup.sh`, `proton-fallback`,
 `netmaster` and the installers support `--dry-run`.
 
@@ -716,6 +766,17 @@ changes at all**. Everything that writes says so; `harden-dns.sh`,
   publishes no fingerprint to pin to.
 - **`probesource`'s active and aggressive tactics send packets to the target.**
   Use them only on hosts and networks you own or are authorised to test.
+- **OpenSnitch questions the suite's own probes.** The first `nmap`,
+  `arp-scan`, `tcpdump` or `probesource` tactic to reach out raises a prompt;
+  these are command-line tools, so no blanket rule covers them. Allow each
+  once. The seeded rules cover only the daemons and the watchdog's pinned
+  checks. Without the UI the daemon's default action is *allow*, so a closed
+  UI never breaks the network — it only stops asking.
+- **`persistwatch` notifies, it does not block.** A new cron entry or sudoers
+  rule is reported within the pack's interval (five minutes; ten for hashes
+  and setuid scans), not prevented. The first pass after install lists
+  everything that already exists as one summary; run `persistcheck
+  --baseline` then to take the snapshot you will diff against.
 - **`netwatch` needs a firewalld log target** to have anything to read.
 - **Lint is clean and enforced.** CI fails on any `shellcheck` warning across
   every bash tool, including the kill-switch root helper, and on the full
