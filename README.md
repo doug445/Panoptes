@@ -457,6 +457,7 @@ sudo ./install.sh --no-proton  # skip installing the Proton VPN client
 sudo ./install.sh --no-endpoint   # skip OpenSnitch, osquery and the persistence watch
 sudo ./install.sh --no-helpers # skip the sudoers rules and the kill-switch service
 sudo ./install.sh --no-mac-random   # skip the Wi-Fi MAC randomization drop-in
+sudo ./install.sh --no-nm-restart   # leave NetworkManager and the running trays alone
 ./install.sh --user            # user tools only, no sudo, into ~/.local/bin
 sudo ./uninstall.sh            # removes everything it installed
 ```
@@ -472,10 +473,13 @@ A full `sudo ./install.sh` also writes one NetworkManager drop-in,
 per scan and per connection and an access point cannot recognize your machine
 across visits.
 
-**NetworkManager is not restarted.** A restart drops every connection, which is
-a poor thing to do in the middle of an install and can strand the default route
-on a machine whose routing belongs to a VPN tunnel. The drop-in takes effect on
-your next reboot, or immediately with:
+**NetworkManager is restarted once, at the very end.** A restart drops every
+connection, which can strand the default route on a machine whose routing
+belongs to a VPN tunnel, so it waits until the kill-switch's NetworkManager
+guard is in place; the connection comes back within seconds. The running tray
+applets are then replaced with the freshly installed ones. With
+`--no-nm-restart` neither happens, and the drop-in takes effect on your next
+reboot, or immediately with:
 
 ```bash
 sudo systemctl restart NetworkManager
