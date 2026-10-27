@@ -57,18 +57,41 @@ whois_lookup() {
 
 # Firewall
 section "FIREWALL"
-zone=$(sudo firewall-cmd --get-default-zone 2>/dev/null || true)
-log_denied=$(sudo firewall-cmd --get-log-denied 2>/dev/null || true)
-if [[ "$zone" == "drop" ]]; then
-    echo -e "  Default zone: ${GREEN}${zone}${NC} (all unsolicited inbound silently dropped)"
+# firewalld on the Fedora/openSUSE families, ufw on Debian/Ubuntu/Mint/Arch.
+if systemctl is-active --quiet firewalld 2>/dev/null; then
+    echo -e "  Firewall:     firewalld"
+    zone=$(sudo firewall-cmd --get-default-zone 2>/dev/null || true)
+    log_denied=$(sudo firewall-cmd --get-log-denied 2>/dev/null || true)
+    if [[ "$zone" == "drop" ]]; then
+        echo -e "  Default zone: ${GREEN}${zone}${NC} (all unsolicited inbound silently dropped)"
+    else
+        echo -e "  Default zone: ${RED}${zone}${NC} (consider switching to 'drop')"
+    fi
+    echo -e "  Log denied:   ${log_denied}"
+    services=$(sudo firewall-cmd --list-services 2>/dev/null || true)
+    ports=$(sudo firewall-cmd --list-ports 2>/dev/null || true)
+    echo -e "  Open services: ${services:-${GREEN}none${NC}}"
+    echo -e "  Open ports:    ${ports:-${GREEN}none${NC}}"
+elif command -v ufw &>/dev/null && sudo ufw status 2>/dev/null | grep -q '^Status: active'; then
+    echo -e "  Firewall:     ufw"
+    ufw_v=$(sudo ufw status verbose 2>/dev/null || true)
+    incoming=$(printf '%s\n' "$ufw_v" | sed -n 's/^Default: \([a-z]*\) (incoming).*/\1/p')
+    if [[ "$incoming" == "deny" ]] || [[ "$incoming" == "reject" ]]; then
+        echo -e "  Incoming:     ${GREEN}${incoming}${NC} (unsolicited inbound blocked)"
+    else
+        echo -e "  Incoming:     ${RED}${incoming:-unknown}${NC} (consider: sudo ufw default deny incoming)"
+    fi
+    echo -e "  Logging:      $(printf '%s\n' "$ufw_v" | sed -n 's/^Logging: //p')"
+    rules=$(printf '%s\n' "$ufw_v" | sed -n '/^--/,$p' | tail -n +2 | grep -v '^$' || true)
+    if [[ -n "$rules" ]]; then
+        echo -e "  Allow rules:"
+        printf '%s\n' "$rules" | sed 's/^/    /'
+    else
+        echo -e "  Allow rules:  ${GREEN}none${NC}"
+    fi
 else
-    echo -e "  Default zone: ${RED}${zone}${NC} (consider switching to 'drop')"
+    echo -e "  ${RED}No firewall active${NC} (firewalld on Fedora/openSUSE, ufw on Debian/Ubuntu/Mint/Arch)"
 fi
-echo -e "  Log denied:   ${log_denied}"
-services=$(sudo firewall-cmd --list-services 2>/dev/null || true)
-ports=$(sudo firewall-cmd --list-ports 2>/dev/null || true)
-echo -e "  Open services: ${services:-${GREEN}none${NC}}"
-echo -e "  Open ports:    ${ports:-${GREEN}none${NC}}"
 
 # Listening ports
 section "LISTENING PORTS"
@@ -301,7 +324,7 @@ fi
 
 # Recent drops
 section "RECENT FIREWALL DROPS (last 5 min)"
-drops=$(journalctl -k --since "5 min ago" --no-pager 2>/dev/null | grep -c "_DROP" || true)
+drops=$(journalctl -k --since "5 min ago" --no-pager 2>/dev/null | grep -cE '_DROP|FINAL_REJECT|\[UFW BLOCK\]' || true)
 if (( drops > 0 )); then
     echo -e "  ${YELLOW}${drops} packets dropped${NC}"
     while read -r line; do
@@ -310,7 +333,7 @@ if (( drops > 0 )); then
         dpt=$(echo "$line" | grep -oP 'DPT=\K\d+' || echo "?")
         org=$(whois_lookup "$src")
         echo -e "    ${src} → :${dpt} (${proto})${org:+ ${YELLOW}[${org}]${NC}}"
-    done < <(journalctl -k --since "5 min ago" --no-pager 2>/dev/null | grep "_DROP" | grep -v "DST=255.255.255.255" | grep -v "DST=224." | grep -v "DPT=5353" | tail -5)
+    done < <(journalctl -k --since "5 min ago" --no-pager 2>/dev/null | grep -E '_DROP|FINAL_REJECT|\[UFW BLOCK\]' | grep -v "DST=255.255.255.255" | grep -v "DST=224." | grep -v "DPT=5353" | tail -5)
 else
     echo -e "  ${GREEN}No drops — quiet network${NC}"
 fi

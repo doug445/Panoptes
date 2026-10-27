@@ -5,6 +5,22 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **One host firewall, the distribution's own.** `panoptes-deps.sh
+  --with-optional` asked for firewalld everywhere, so on Mint it installed and
+  started firewalld next to the already active ufw. The requirement is now
+  "a host firewall": firewalld on the Fedora and openSUSE families, ufw on
+  Debian/Ubuntu/Mint, Arch and Alpine, and a machine that has either is
+  already satisfied.
+- **`netcheck` reports ufw.** The firewall section reads whichever firewall is
+  active: firewalld's default zone, log-denied and open services/ports, or
+  ufw's incoming policy, logging level and allow rules. With neither active it
+  says so in red. The recent-drops count matches ufw's `[UFW BLOCK]` lines as
+  well as firewalld's.
+- **`netwatch` alerts on ufw drops.** It matched only firewalld's `_DROP` and
+  `FINAL_REJECT` log prefixes, so a ufw machine never raised a drop alert.
+
 ## [3.1.2] — 2026-10-27
 
 The installer finishes the job instead of leaving it for the next reboot.

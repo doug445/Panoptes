@@ -196,7 +196,8 @@ while true; do
     rc=0
     read -r -t "$POLL_INTERVAL" line <&3 || rc=$?
     if (( rc == 0 )); then
-        if [[ "$line" == *"_DROP"* ]] || [[ "$line" == *"FINAL_REJECT"* ]]; then
+        # firewalld logs "<zone>_DROP" / "FINAL_REJECT"; ufw logs "[UFW BLOCK]".
+        if [[ "$line" == *"_DROP"* ]] || [[ "$line" == *"FINAL_REJECT"* ]] || [[ "$line" == *"[UFW BLOCK]"* ]]; then
             src_ip=$(echo "$line" | grep -oP 'SRC=\K[0-9a-fA-F.:]+' || echo "unknown")
             proto=$(echo "$line" | grep -oP 'PROTO=\K\w+' || echo "?")
             dpt=$(echo "$line" | grep -oP 'DPT=\K\d+' || echo "?")

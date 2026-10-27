@@ -56,6 +56,12 @@ usage() { sed -n '/^# panoptes-deps\.sh —/,/^[^#]/p' "$0" | sed -e '/^[^#]/d' 
 #         pc:NAME        pkg-config must resolve NAME (development headers)
 #         py:MODULE      python3 must import MODULE
 #         file:PATH      PATH must exist (lib/lib64/multiarch variants are tried)
+#         fw:            either host firewall is present: ufw or firewalld
+#
+# One host firewall, never two: the distribution's own. firewalld for the
+# Fedora and openSUSE families, ufw for Debian/Ubuntu/Mint, Arch and Alpine. A
+# machine that already has either one is satisfied, so installing the suite
+# never puts a second firewall next to the one in use.
 #
 # pyqt6 is optional because only the KDE branch of dns-tray/warp-tray imports it;
 # pass --with-optional on a Plasma desktop.
@@ -82,7 +88,7 @@ arp-scan|cmd:arp-scan|core|no|arp-scan|arp-scan|arp-scan|arp-scan|arp-scan
 rfkill|cmd:rfkill|core|no|util-linux|rfkill|util-linux|util-linux|util-linux
 lspci|cmd:lspci|core|no|pciutils|pciutils|pciutils|pciutils|pciutils
 nft|cmd:nft|firewall|no|nftables|nftables|nftables|nftables|nftables
-firewall-cmd|cmd:firewall-cmd|firewall|yes|firewalld|firewalld|firewalld|firewalld|-
+firewall|fw:|firewall|yes|firewalld|ufw|ufw|firewalld|ufw
 nmap|cmd:nmap|investigate|no|nmap|nmap|nmap|nmap|nmap
 tcpdump|cmd:tcpdump|investigate|no|tcpdump|tcpdump|tcpdump|tcpdump|tcpdump
 tshark|cmd:tshark|investigate|yes|wireshark-cli|tshark|wireshark-cli|wireshark|tshark
@@ -214,6 +220,7 @@ have() {  # $1 = probe spec
         cmd:*)  command -v "${1#cmd:}" >/dev/null 2>&1 ;;
         pc:*)   command -v pkg-config >/dev/null 2>&1 && pkg-config --exists "${1#pc:}" ;;
         py:*)   command -v python3 >/dev/null 2>&1 && python3 -c "import ${1#py:}" >/dev/null 2>&1 ;;
+        fw:)    command -v ufw >/dev/null 2>&1 || command -v firewall-cmd >/dev/null 2>&1 ;;
         file:*) f=${1#file:}; b=${f##*/}
                 # 64-bit distros disagree on lib vs lib64, and Debian multiarch
                 # keeps typelibs under /usr/lib/<triplet>/; accept any of them.
