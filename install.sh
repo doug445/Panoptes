@@ -22,6 +22,7 @@
 #   sudo ./install.sh --no-proton       skip installing the Proton VPN client
 #   sudo ./install.sh --no-endpoint     skip OpenSnitch, osquery and the persistence watch
 #   sudo ./install.sh --no-helpers      skip the kill-switch service and sudoers rules
+#   sudo ./install.sh --no-nm-restart   do not restart NetworkManager or the trays at the end
 #
 # Unless --no-deps is given, panoptes-deps.sh runs first: it identifies the
 # distribution and package manager and offers to install whatever is missing.
@@ -38,6 +39,11 @@
 # when Cloudflare WARP is installed, `warp-killswitch install` (watchdog
 # service, crash purge, sleep hook, NetworkManager guard, pinned sudoers rule).
 # All of it is idempotent; --no-helpers leaves it out.
+#
+# A full install ends by restarting NetworkManager, so the drop-ins written
+# above take effect now rather than at the next reboot, and then replaces any
+# running tray applets with the freshly installed ones. --no-nm-restart skips
+# both.
 
 set -euo pipefail
 
@@ -58,7 +64,7 @@ DNS_SYS=(audit-dns.sh harden-dns.sh dns-toggle)
 DNS_USER=(checkdns dns-status.sh dns-tray)
 ECH_SYS=(panoptes-deps.sh ech-build.sh ech-browsers.sh)
 
-DRY=0; MODE=all; DEPS=1; MACRAND=1; PROTON=1; HELPERS=1; ENDPOINT=1; WITH_OPT=0
+DRY=0; MODE=all; DEPS=1; MACRAND=1; PROTON=1; HELPERS=1; ENDPOINT=1; WITH_OPT=0; NMRESTART=1
 for a in "$@"; do
     case "$a" in
         --dry-run)   DRY=1 ;;
@@ -72,6 +78,7 @@ for a in "$@"; do
         --no-proton) PROTON=0 ;;
         --no-endpoint) ENDPOINT=0 ;;
         --no-helpers) HELPERS=0 ;;
+        --no-nm-restart) NMRESTART=0 ;;
         -h|--help)   sed -n '/^# Installs the Panoptes tools/,/^[^#]/p' "$0" \
                          | sed -e '/^[^#]/d' -e 's/^# \?//'; exit 0 ;;
         *) echo "unknown option: $a" >&2; exit 1 ;;
@@ -189,10 +196,10 @@ esac
 # and per connection so an access point cannot recognize this machine across
 # visits. Full install only; skip with --no-mac-random.
 #
-# NetworkManager is deliberately NOT restarted. A restart tears down every
-# connection mid-install, and on a box whose default route belongs to a VPN's
-# adopted tunnel that can strand the route table. The drop-in takes effect on
-# the next NetworkManager restart or reboot.
+# NetworkManager is NOT restarted here. A restart tears down every connection,
+# and on a box whose default route belongs to a VPN's adopted tunnel that can
+# strand the route table. It is restarted once, as the last step, after the
+# kill-switch's NetworkManager guard is in place.
 #
 # Declined outright when a Wi-Fi driver cannot cope with a cloned MAC: wl, b43,
 # b43legacy and brcmsmac, as used by Intel Macs and older Broadcom laptops.
@@ -228,9 +235,12 @@ if [ "$MODE" = all ] && [ "$MACRAND" -eq 1 ]; then
         fi
         install -m 0644 "$NM_SRC" "$NM_DIR/mac-randomization.conf"
         echo "  $NM_DIR/mac-randomization.conf"
-        echo "  NetworkManager was NOT restarted -- that would drop this connection."
-        echo "  Active on next reboot, or now with:"
-        echo "    sudo systemctl restart NetworkManager"
+        if [ "$NMRESTART" -eq 1 ]; then
+            echo "  Active once NetworkManager restarts at the end of this install."
+        else
+            echo "  Active on next reboot, or now with:"
+            echo "    sudo systemctl restart NetworkManager"
+        fi
     fi
 fi
 
@@ -309,6 +319,69 @@ if [ "$MODE" = all ] && [ "$HELPERS" -eq 1 ]; then
         echo "  Cloudflare WARP is not installed: kill-switch service skipped (warp-setup.sh installs both)"
     fi
 fi
+
+# ── Restart NetworkManager, then the trays ───────────────────────────────
+#
+# Last, so every NetworkManager drop-in above (MAC randomization, the
+# kill-switch's unmanaged-tunnel guard, connectivity check off) is in place
+# before the one restart that activates them. The trays go after it: they read
+# WARP and resolver state at startup, and an old copy left running would keep
+# executing the code this install just replaced.
+
+# Prints the graphical-session environment of $1 as NAME=value lines, taken
+# from a running tray if there is one, else from any process of theirs that
+# has a display. Returns 1 when the user has no session.
+session_env() {
+    local u=$1 p e
+    for p in $(pgrep -u "$u" -f '/(warp|dns)-tray( |$)') $(pgrep -u "$u"); do
+        e="$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null \
+             | grep -E '^(DISPLAY|WAYLAND_DISPLAY|XAUTHORITY|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR)=')" || continue
+        grep -qE '^(DISPLAY|WAYLAND_DISPLAY)=' <<<"$e" || continue
+        grep -q '^DBUS_SESSION_BUS_ADDRESS=' <<<"$e" || continue
+        printf '%s\n' "$e"; return 0
+    done
+    return 1
+}
+
+if [ "$MODE" = all ] && [ "$NMRESTART" -eq 1 ] && systemctl is-active -q NetworkManager 2>/dev/null; then
+    echo ""
+    echo "NetworkManager"
+    if [ "$DRY" -eq 1 ]; then
+        echo "  would run: systemctl restart NetworkManager"
+    else
+        systemctl restart NetworkManager
+        if nm-online -q -t 45 2>/dev/null; then echo "  restarted, online"
+        else echo "  restarted; not online yet -- warp-watchdog will heal the tunnel if it stays down"; fi
+    fi
+fi
+
+case "$MODE" in
+    all|user|dns)
+        tray_user="${SUDO_USER:-$(id -un)}"
+        if [ "$NMRESTART" -eq 1 ] && [ "$tray_user" != root ]; then
+            echo ""
+            echo "Tray applets"
+            trays=()
+            for t in warp-tray dns-tray; do [ -x "$USER_DIR/$t" ] && trays+=("$t"); done
+            if [ "${#trays[@]}" -eq 0 ]; then
+                echo "  none installed"
+            elif [ "$DRY" -eq 1 ]; then
+                echo "  would stop every running ${trays[*]} and start the installed ones"
+            elif ! env_lines="$(session_env "$tray_user")"; then
+                pkill -u "$tray_user" -f '/(warp|dns)-tray( |$)' 2>/dev/null || true
+                echo "  no graphical session for $tray_user; the trays start at next login"
+            else
+                pkill -u "$tray_user" -f '/(warp|dns)-tray( |$)' 2>/dev/null || true
+                sleep 1
+                mapfile -t session <<<"$env_lines"
+                as_user=(); [ "$(id -u)" -eq 0 ] && as_user=(runuser -u "$tray_user" --)
+                for t in "${trays[@]}"; do
+                    "${as_user[@]}" env "${session[@]}" setsid -f "$USER_DIR/$t" \
+                        >/dev/null 2>&1 </dev/null && echo "  started $t"
+                done
+            fi
+        fi ;;
+esac
 
 echo ""
 svc=""

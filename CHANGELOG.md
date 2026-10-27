@@ -5,6 +5,34 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [3.1.2] — 2026-10-27
+
+The installer finishes the job instead of leaving it for the next reboot.
+
+### Changed
+
+- **A full install ends by restarting NetworkManager.** The MAC-randomization
+  drop-in and the kill-switch's unmanaged-tunnel and connectivity-check
+  drop-ins used to wait for the next reboot. The restart is the last step,
+  after the guard that keeps NetworkManager off WARP's tunnel is in place, and
+  `nm-online` waits for the link to come back. `--no-nm-restart` keeps the old
+  behaviour.
+- **The tray applets are replaced with the new code.** An old `warp-tray` or
+  `dns-tray` left running kept executing what the install had just replaced.
+  Every running copy is stopped and the installed ones are started in the
+  invoking user's graphical session (its environment is read from the running
+  tray, or from any of that user's processes with a display). With no session,
+  they start at next login. `--no-nm-restart` skips this too.
+
+### Verified
+
+- Full `sudo ./install.sh --with-optional` on Linux Mint 22.3 (ASUS UX534FTC),
+  run twice: dependencies, Proton VPN 4.18.8 + CLI 1.0.5, OpenSnitch 1.5.8,
+  osquery 5.24.0 with the persistence pack and `persistwatch`, the sudoers
+  rules and `warp-killswitch install`. The second run changed nothing,
+  restarted NetworkManager (randomized MAC active, WARP reconnected,
+  kill-switch armed) and replaced both trays.
+
 ## [3.1.1] — 2026-10-27
 
 The 3.1.0 installers meeting Fedora 44, plus the first real run of the
@@ -633,6 +661,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[3.1.2]: https://github.com/doug445/Panoptes/releases/tag/v3.1.2
 [3.1.1]: https://github.com/doug445/Panoptes/releases/tag/v3.1.1
 [3.1.0]: https://github.com/doug445/Panoptes/releases/tag/v3.1.0
 [3.0.0]: https://github.com/doug445/Panoptes/releases/tag/v3.0.0
