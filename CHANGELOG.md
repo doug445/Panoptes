@@ -10,6 +10,26 @@ This project follows [Semantic Versioning](https://semver.org/).
 The 3.1.0 installers meeting Fedora 44, plus the first real run of the
 endpoint component.
 
+### Changed
+
+- **Persistence-change notifications no longer make a sound.** `persistwatch`
+  sends the freedesktop `suppress-sound` hint and drops the urgency below
+  critical, because Cinnamon plays its notification sound whenever
+  `!silent || urgency >= Urgency.HIGH` — a critical alert beeps however the
+  hint is set. The `resident` hint buys back what critical gave us, so an
+  alert still waits to be dismissed instead of expiring. A burst of them is
+  now quiet. `PERSISTWATCH_SOUND=1` restores the old critical-with-sound
+  behaviour.
+
+### Added
+
+- **`proton-setup.sh --trust-new-key`.** Proton mints a signing key per
+  Fedora release, so each new Fedora lands with no pinned fingerprint. That
+  case now fetches the release's key over HTTPS, refuses any uid naming a
+  *different* release, prints the fingerprint and creation date, and asks
+  before importing. `--trust-new-key` accepts it unattended; with no terminal
+  and no flag it refuses, so trust is never widened silently.
+
 ### Fixed
 
 - **`proton-setup.sh` refused to bootstrap on Fedora 44.** Proton signs each
@@ -28,6 +48,13 @@ endpoint component.
   `panoptes-deps.sh` names the flag in its own summary line, yet `install.sh`
   neither accepted it — unknown options hit `exit 1` — nor forwarded it to
   the bootstrapper. It now does both, and `--help` lists it.
+- **`proton-setup.sh` reported "signing key not imported" for a key it had
+  just imported**, from two independent bugs in one line: rpm now names the
+  `gpg-pubkey` package after the key's full 40-hex fingerprint rather than
+  the 8-hex short id the script derived, and `rpm -qa … | grep -q` exits
+  **141** under `set -o pipefail` because `grep -q` closes the pipe on the
+  first match and rpm dies of `SIGPIPE`. The lookup now matches either
+  naming scheme and uses no pipe at all.
 
 - **The persistence pack's `startup_items` query listed every systemd unit
   and mount** (728 rows on a laptop): osquery's Linux table folds those in
@@ -607,6 +634,8 @@ scripts.
   warning level and ruff's full default ruleset as fatal gates.
 
 [3.1.1]: https://github.com/doug445/Panoptes/releases/tag/v3.1.1
+[3.1.0]: https://github.com/doug445/Panoptes/releases/tag/v3.1.0
+[3.0.0]: https://github.com/doug445/Panoptes/releases/tag/v3.0.0
 [2.5.0]: https://github.com/doug445/Panoptes/releases/tag/v2.5.0
 [2.4.1]: https://github.com/doug445/Panoptes/releases/tag/v2.4.1
 [2.4.0]: https://github.com/doug445/Panoptes/releases/tag/v2.4.0

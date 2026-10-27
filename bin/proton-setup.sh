@@ -50,6 +50,8 @@
 #   sudo ./proton-setup.sh --no-tray    skip the AppIndicator packages
 #   sudo ./proton-setup.sh --no-cli     skip the official CLI
 #   sudo ./proton-setup.sh --flatpak    install the Flathub build (com.protonvpn.www) instead
+#   sudo ./proton-setup.sh --trust-new-key  accept an unpinned Fedora release's key
+#                                      unattended, once its uid checks out
 #   sudo ./proton-setup.sh --uninstall  remove the client, the CLI and the repository
 #
 # Supported: Debian/Ubuntu family (Mint, Pop!_OS, LMDE included) and Fedora
@@ -74,8 +76,9 @@ DEB_SOURCES=/etc/apt/sources.list.d/protonvpn-stable.sources
 # has to be per release. The uid says which: "Proton Technologies AG
 # (Fedora NN) <opensource@proton.me>". All four read from
 # repo.protonvpn.com and verified over a valid TLS chain on 2026-10-27.
-# An unlisted release fails closed in rpm_bootstrap rather than trusting
-# whatever the repository happens to serve.
+# An unlisted release is not trusted blindly: rpm_bootstrap fetches that
+# release's key, requires its uid to name the release, and asks before
+# importing it (--trust-new-key to accept unattended).
 rpm_key_fpr_for() {
     case "$1" in
         41) echo F20018AD1914638BC3B485F7413E4BA367FCBBBB ;;
@@ -103,7 +106,7 @@ RPM_TRAY="libappindicator-gtk3"
 ARCH_TRAY="libappindicator-gtk3"
 
 # ------------------------------------------------------------------ arguments
-MODE=full; DRY=0; ASSUME_YES=0; TRAY=1; CLI=1; FLATPAK=0
+MODE=full; DRY=0; ASSUME_YES=0; TRAY=1; CLI=1; FLATPAK=0; TRUST_NEW_KEY=0
 for a in "$@"; do
     case "$a" in
         --check)     MODE=check ;;
@@ -113,6 +116,7 @@ for a in "$@"; do
         --no-tray)   TRAY=0 ;;
         --no-cli)    CLI=0 ;;
         --flatpak)   FLATPAK=1 ;;
+        --trust-new-key) TRUST_NEW_KEY=1 ;;
         -h|--help)   usage; exit 0 ;;
         *) echo "proton-setup.sh: unknown option: $a" >&2; exit 2 ;;
     esac
@@ -193,6 +197,76 @@ missing_of() {  # missing_of "pkg pkg ..." -> the ones not installed
 key_fpr_of() {  # key_fpr_of FILE (armored or binary keyring) -> primary fingerprint
     gpg --batch --show-keys --with-colons "$1" 2>/dev/null | awk -F: '/^fpr/{print $10; exit}'
 }
+key_uid_of() {  # key_uid_of FILE -> primary user id
+    gpg --batch --show-keys --with-colons "$1" 2>/dev/null | awk -F: '/^uid/{print $10; exit}'
+}
+key_created_of() {  # key_created_of FILE -> YYYY-MM-DD the primary key was made
+    local t
+    t=$(gpg --batch --show-keys --with-colons "$1" 2>/dev/null | awk -F: '/^pub/{print $6; exit}')
+    [ -n "$t" ] && date -u -d "@$t" +%Y-%m-%d 2>/dev/null || printf '%s' "${t:-unknown}"
+}
+# rpm >= 4.20 names the gpg-pubkey package after the key's FULL lowercase
+# fingerprint (gpg-pubkey-6929133b...844830d4-69b2b795); older rpm used only
+# the 8-hex short id. Match either, or the import looks like it never happened.
+# Matched without a pipe on purpose: `rpm -qa | grep -q` exits 141 under
+# `set -o pipefail`, because grep -q closes the pipe on the first match and
+# rpm dies of SIGPIPE. That read as "key not imported" on every box that had
+# one.
+rpm_key_imported() {  # rpm_key_imported FINGERPRINT
+    local f short have
+    f=$(printf '%s' "$1" | tr 'A-F' 'a-f')
+    short=$(printf '%s' "$f" | tail -c 8)
+    have=$(rpm -qa 'gpg-pubkey*' --qf '%{VERSION}\n' 2>/dev/null)
+    case "
+$have
+" in
+        *"
+$f
+"*|*"
+$short
+"*) return 0 ;;
+    esac
+    return 1
+}
+# No pinned fingerprint for this Fedora release: Proton mints a new key per
+# release, so a new Fedora always lands here first. Fetch it over HTTPS,
+# require the uid to name THIS release (a key for another release, or any
+# other uid, is refused outright), then show what is about to be trusted and
+# ask. Unattended runs refuse unless --trust-new-key was passed, so trust is
+# never widened silently. Prompts go to stderr; stdout is the fingerprint.
+adopt_new_fedora_key() {   # adopt_new_fedora_key BASEURL -> fingerprint
+    local base=$1 fpr uid
+    $CURL -o "$TMP/newkey.asc" "$base/public_key.asc" \
+        || die "no pinned key for Fedora $VER_ID, and $base/public_key.asc did not fetch"
+    fpr=$(key_fpr_of "$TMP/newkey.asc")
+    uid=$(key_uid_of "$TMP/newkey.asc")
+    [ -n "$fpr" ] || die "$base/public_key.asc is not a usable OpenPGP key"
+    # Proton is not consistent here: the Fedora 44 key names its release in the
+    # uid, while 41-43 and the Debian key all use the plain company uid. Accept
+    # either, but refuse a uid that names some OTHER release -- that means the
+    # release directory is serving the wrong key.
+    case "$uid" in
+        "Proton Technologies AG (Fedora ${VER_ID}) <opensource@proton.me>") ;;
+        "Proton Technologies AG <opensource@proton.me>") ;;
+        *) die "key at $base/public_key.asc carries uid '$uid', which is neither Proton's company uid nor Fedora ${VER_ID}'s — refusing" ;;
+    esac
+    {
+        printf '  %s!%s no pinned signing key for Fedora %s\n' "$Y" "$N" "$VER_ID"
+        printf '      uid         %s  %s[accepted]%s\n' "$uid" "$G" "$N"
+        printf '      fingerprint %s\n' "$fpr"
+        printf '      created     %s\n' "$(key_created_of "$TMP/newkey.asc")"
+    } >&2
+    if [ "$TRUST_NEW_KEY" -eq 1 ]; then
+        printf '  %s✓%s trusting it (--trust-new-key)\n' "$G" "$N" >&2
+    elif [ -e /dev/tty ]; then
+        printf 'Trust this key for Fedora %s? [y/N] ' "$VER_ID" >&2
+        local r; read -r r </dev/tty || r=n
+        case "$r" in [yY]*) ;; *) die "not trusted — nothing installed" ;; esac
+    else
+        die "refusing a new signing key with no terminal to ask at — verify the fingerprint above, then re-run with --trust-new-key"
+    fi
+    printf '%s' "$fpr"
+}
 cli_version() {
     case "$FAMILY" in
         debian) dpkg-query -W -f='${Version}' proton-vpn-cli 2>/dev/null ;;
@@ -232,7 +306,7 @@ report() {
         fedora)
             if [ -f "$RPM_REPO_FILE" ]; then ok "repository  $RPM_REPO_FILE"; else warn "repository  not configured"; fi
             if [ -z "$RPM_KEY_FPR" ]; then warn "signing key no pinned key for Fedora $VER_ID"
-            elif rpm -q "gpg-pubkey-$(printf '%s' "$RPM_KEY_FPR" | tail -c 8 | tr 'A-F' 'a-f')" >/dev/null 2>&1; then ok "signing key imported"
+            elif rpm_key_imported "$RPM_KEY_FPR"; then ok "signing key imported"
             else warn "signing key not imported"; fi ;;
     esac
     if app_installed; then ok "app         $(app_version)"; else warn "app         not installed"; short=1; fi
@@ -351,13 +425,19 @@ apt_install() {
 
 # ------------------------------------------------------------------ dnf
 rpm_bootstrap() {
-    [ -n "$RPM_KEY_FPR" ] || die "no pinned signing key for Fedora $VER_ID (Proton uses one key per release).
-  Verify it yourself, then add it to rpm_key_fpr_for():
-    curl -fsSL https://repo.protonvpn.com/fedora-${VER_ID}-stable/public_key.asc | gpg --show-keys
-  The uid must read 'Proton Technologies AG (Fedora ${VER_ID}) <opensource@proton.me>'."
-    local keyid; keyid=$(printf '%s' "$RPM_KEY_FPR" | tail -c 8 | tr 'A-F' 'a-f')
     local base="https://repo.protonvpn.com/fedora-${VER_ID}-stable"
-    if rpm -q "gpg-pubkey-$keyid" >/dev/null 2>&1; then same "signing key gpg-pubkey-$keyid"
+    if [ -z "$RPM_KEY_FPR" ]; then
+        if [ "$DRY" -eq 1 ]; then
+            say "Importing Proton's RPM signing key"
+            printf '  %swould:%s fetch %s/public_key.asc, require uid %s, show its fingerprint and ask before trusting it\n' \
+                "$Y" "$N" "$base" "'Proton Technologies AG (Fedora ${VER_ID}) <opensource@proton.me>'"
+            return 0
+        fi
+        [ -n "$TMP" ] || TMP=$(mktemp -d)
+        RPM_KEY_FPR=$(adopt_new_fedora_key "$base") || exit 1
+    fi
+    local keyid; keyid=$(printf '%s' "$RPM_KEY_FPR" | tr 'A-F' 'a-f')
+    if rpm_key_imported "$RPM_KEY_FPR"; then same "signing key gpg-pubkey-$keyid"
     else
         say "Importing Proton's RPM signing key"
         if [ "$DRY" -eq 1 ]; then printf '  %swould:%s fetch %s/public_key.asc, check %s, rpm --import\n' "$Y" "$N" "$base" "$RPM_KEY_FPR"
