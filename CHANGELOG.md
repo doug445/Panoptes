@@ -5,6 +5,10 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [3.1.3] — 2026-10-27
+
+One host firewall, the distribution's own, and the tools that read it.
+
 ### Changed
 
 - **One host firewall, the distribution's own.** `panoptes-deps.sh
@@ -677,6 +681,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[3.1.3]: https://github.com/doug445/Panoptes/releases/tag/v3.1.3
 [3.1.2]: https://github.com/doug445/Panoptes/releases/tag/v3.1.2
 [3.1.1]: https://github.com/doug445/Panoptes/releases/tag/v3.1.1
 [3.1.0]: https://github.com/doug445/Panoptes/releases/tag/v3.1.0
