@@ -3,7 +3,7 @@
 All notable changes to Panoptes are recorded here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [3.1.1] — 2026-10-27
+## [Unreleased]
 
 Found on the first real run of the endpoint component.
 
