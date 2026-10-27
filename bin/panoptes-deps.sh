@@ -61,6 +61,8 @@ usage() { sed -n '/^# panoptes-deps\.sh —/,/^[^#]/p' "$0" | sed -e '/^[^#]/d' 
 # pass --with-optional on a Plasma desktop.
 #
 # "-" means the distribution does not package it under any name we know.
+# Fedora retired wireless-tools (no iwconfig in F44), so it is "-" there: iw
+# is a core requirement and wifi-recover.sh guards every iwconfig call.
 #
 REQUIREMENTS=$(cat <<'TABLE'
 ip|cmd:ip|core|no|iproute|iproute2|iproute2|iproute2|iproute2
@@ -73,7 +75,7 @@ curl|cmd:curl|core|no|curl|curl|curl|curl|curl
 whois|cmd:whois|core|no|whois|whois|whois|whois|whois
 awk|cmd:awk|core|no|gawk|gawk|gawk|gawk|gawk
 iw|cmd:iw|core|no|iw|iw|iw|iw|iw
-iwconfig|cmd:iwconfig|core|yes|wireless-tools|wireless-tools|wireless_tools|wireless-tools|wireless-tools
+iwconfig|cmd:iwconfig|core|yes|-|wireless-tools|wireless_tools|wireless-tools|wireless-tools
 ping|cmd:ping|core|no|iputils|iputils-ping|iputils|iputils|iputils
 arping|cmd:arping|core|no|iputils|iputils-arping|iputils|iputils|iputils
 arp-scan|cmd:arp-scan|core|no|arp-scan|arp-scan|arp-scan|arp-scan|arp-scan

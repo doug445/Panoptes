@@ -70,7 +70,22 @@ DEB_KEY_FPR=84B0D3492C76C9C6F5873C18EDA3E22630349F1C
 DEB_REPO=https://repo.protonvpn.com/debian
 DEB_KEYRING=/usr/share/keyrings/protonvpn-stable-archive-keyring.gpg   # what protonvpn-stable-release ships
 DEB_SOURCES=/etc/apt/sources.list.d/protonvpn-stable.sources
-RPM_KEY_FPR=7BB2808996C47DC9EECDA475F7EB64B08C03490D
+# Proton signs EACH Fedora release's repository with its own key, so the pin
+# has to be per release. The uid says which: "Proton Technologies AG
+# (Fedora NN) <opensource@proton.me>". All four read from
+# repo.protonvpn.com and verified over a valid TLS chain on 2026-10-27.
+# An unlisted release fails closed in rpm_bootstrap rather than trusting
+# whatever the repository happens to serve.
+rpm_key_fpr_for() {
+    case "$1" in
+        41) echo F20018AD1914638BC3B485F7413E4BA367FCBBBB ;;
+        42) echo 55AA81128CFFFF46DF140838BC187A13AD10060B ;;
+        43) echo 7BB2808996C47DC9EECDA475F7EB64B08C03490D ;;
+        44) echo 6929133BDE1CE1CFA9EDB286D84176F6844830D4 ;;
+        *)  echo "" ;;
+    esac
+}
+RPM_KEY_FPR=""
 RPM_REPO_FILE=/etc/yum.repos.d/protonvpn-stable.repo
 FLATPAK_ID=com.protonvpn.www
 AUR_APP=proton-vpn-gtk-app
@@ -148,6 +163,7 @@ case "$FAMILY:$DISTRO_ID" in
     fedora:*) [ "$FLATPAK" -eq 1 ] || { FLATPAK=1; FLATPAK_REASON="Proton has no RPM repository for $DISTRO_ID"; } ;;
     suse:*|alpine:*|unknown:*) [ "$FLATPAK" -eq 1 ] || { FLATPAK=1; FLATPAK_REASON="Proton packages nothing for $FAMILY"; } ;;
 esac
+[ "$FAMILY" = fedora ] && RPM_KEY_FPR=$(rpm_key_fpr_for "$VER_ID")
 FLATPAK_REASON="${FLATPAK_REASON:-}"
 
 # The user who will run the app (makepkg and flatpak --user care; root does not).
@@ -215,8 +231,9 @@ report() {
             else warn "repository  not configured"; fi ;;
         fedora)
             if [ -f "$RPM_REPO_FILE" ]; then ok "repository  $RPM_REPO_FILE"; else warn "repository  not configured"; fi
-            rpm -q "gpg-pubkey-$(printf '%s' "$RPM_KEY_FPR" | tail -c 8 | tr 'A-F' 'a-f')" >/dev/null 2>&1 \
-                && ok "signing key imported" || warn "signing key not imported" ;;
+            if [ -z "$RPM_KEY_FPR" ]; then warn "signing key no pinned key for Fedora $VER_ID"
+            elif rpm -q "gpg-pubkey-$(printf '%s' "$RPM_KEY_FPR" | tail -c 8 | tr 'A-F' 'a-f')" >/dev/null 2>&1; then ok "signing key imported"
+            else warn "signing key not imported"; fi ;;
     esac
     if app_installed; then ok "app         $(app_version)"; else warn "app         not installed"; short=1; fi
     if [ "$CLI" -eq 1 ]; then
@@ -334,6 +351,10 @@ apt_install() {
 
 # ------------------------------------------------------------------ dnf
 rpm_bootstrap() {
+    [ -n "$RPM_KEY_FPR" ] || die "no pinned signing key for Fedora $VER_ID (Proton uses one key per release).
+  Verify it yourself, then add it to rpm_key_fpr_for():
+    curl -fsSL https://repo.protonvpn.com/fedora-${VER_ID}-stable/public_key.asc | gpg --show-keys
+  The uid must read 'Proton Technologies AG (Fedora ${VER_ID}) <opensource@proton.me>'."
     local keyid; keyid=$(printf '%s' "$RPM_KEY_FPR" | tail -c 8 | tr 'A-F' 'a-f')
     local base="https://repo.protonvpn.com/fedora-${VER_ID}-stable"
     if rpm -q "gpg-pubkey-$keyid" >/dev/null 2>&1; then same "signing key gpg-pubkey-$keyid"
