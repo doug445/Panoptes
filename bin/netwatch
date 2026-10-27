@@ -25,7 +25,7 @@
 # SOFTWARE.
 #
 # netwatch — monitor for network probes/attacks, send desktop notifications
-# Watches firewalld dropped packets + new inbound connections + ARP anomalies
+# Watches firewalld or ufw dropped packets + new inbound connections + ARP anomalies
 
 set -euo pipefail
 
@@ -35,6 +35,21 @@ POLL_INTERVAL=10
 ALERT_THRESHOLD=5          # notify after this many drops from same IP in window
 ALERT_WINDOW=60            # seconds
 SUMMARY_INTERVAL=300       # summary notification every 5 min if activity
+SUSTAIN_WINDOWS=3          # consecutive hot windows that make a sustained attack
+
+# Notifications are silent except for a real, sustained attack. A busy LAN
+# keeps the firewall dropping all day -- discovery replies from TVs and
+# speakers to random high UDP ports, late TCP ACKs from a CDN after conntrack
+# forgot the flow -- and a beep every five minutes for that trains you to
+# ignore the one that matters. What still sounds:
+#   - a sustained attack: one source sending ALERT_THRESHOLD real probes
+#     (a TCP SYN, or UDP to a service port below 32768) in each of
+#     SUSTAIN_WINDOWS consecutive windows; one alert per episode
+#   - an ARP spoof: the gateway's MAC changed on the same network
+# Silence needs the suppress-sound hint AND an urgency below critical:
+# Cinnamon sounds when `!silent || urgency >= HIGH` (see persistwatch).
+# NETWATCH_SOUND=1 makes every notification sound, as before.
+NETWATCH_SOUND="${NETWATCH_SOUND:-0}"
 
 mkdir -p "$LOG_DIR"
 
@@ -44,8 +59,12 @@ if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
     export DBUS_SESSION_BUS_ADDRESS
 fi
 
-notify() {
-    local urgency="$1" title="$2" body="$3"
+notify() {  # $1 urgency, $2 title, $3 body, $4 "loud" to make a sound
+    local urgency="$1" title="$2" body="$3" sound="${4:-quiet}"
+    local -a hints=(--hint=boolean:suppress-sound:true)
+    # A loud alert stays on screen until dismissed.
+    [[ "$sound" == loud ]] && hints=(--hint=boolean:resident:true)
+    [[ "$NETWATCH_SOUND" == 1 ]] && hints=()
     # KDE pins critical notifications regardless of -t; downgrade to normal
     # and prepend marker to title so alerts still look urgent.
     local icon="network-error"
@@ -58,7 +77,7 @@ notify() {
     # notification history (bell icon). Without it, Plasma 6 treats the app as
     # unknown and discards notifications after the popup timeout.
     notify-send -u "$urgency" -t 15000 -i "$icon" -a "NetWatch" \
-        --hint=string:desktop-entry:netwatch \
+        --hint=string:desktop-entry:netwatch "${hints[@]}" \
         "$title" "$body" 2>/dev/null || true
 }
 
@@ -72,6 +91,11 @@ log_event() {
 declare -A ip_counts
 declare -A ip_first_seen
 declare -A ip_alerted
+declare -A ip_hits          # real probes (see is_probe) from this IP in its window
+declare -A ip_hot           # set once ip_hits reached the threshold this window
+# Hot-window streaks outlive the window and the summary reset.
+declare -A ip_streak ip_last_hot ip_sustained
+sustained_attacks=0
 last_summary=$(date +%s)
 last_check=$last_summary
 total_drops=0
@@ -81,6 +105,9 @@ reset_counters() {
     ip_counts=()
     ip_first_seen=()
     ip_alerted=()
+    ip_hits=()
+    ip_hot=()
+    sustained_attacks=0
     total_drops=0
     unique_ips=0
 }
@@ -103,34 +130,69 @@ is_noise() {
     return 1
 }
 
+# A real probe opens something: a TCP SYN without ACK, or UDP to a service
+# port. Late TCP replies (ACK/FIN/RST after conntrack forgot the flow) and UDP
+# to an ephemeral port (a discovery reply arriving too late) are drops, but
+# nobody is knocking. $1 = kernel log line, $2 = proto, $3 = dpt
+is_probe() {
+    case "$2" in
+        TCP) [[ "$1" == *" SYN "* && "$1" != *" ACK "* ]] ;;
+        UDP) [[ "$3" =~ ^[0-9]+$ ]] && (( $3 < 32768 )) ;;
+        *)   return 1 ;;
+    esac
+}
+
 process_drop() {
-    local src_ip="$1" proto="$2" dpt="$3"
+    local src_ip="$1" proto="$2" dpt="$3" probe="$4"
     local now
     now=$(date +%s)
 
     # Expire old entries outside the alert window
     for ip in "${!ip_first_seen[@]}"; do
         if (( now - ip_first_seen[$ip] > ALERT_WINDOW )); then
-            unset "ip_counts[$ip]" "ip_first_seen[$ip]" "ip_alerted[$ip]"
+            unset "ip_counts[$ip]" "ip_first_seen[$ip]" "ip_alerted[$ip]" "ip_hits[$ip]" "ip_hot[$ip]"
+        fi
+    done
+    # A streak breaks when a source goes a full window without being hot;
+    # that also re-arms its sustained-attack alert.
+    for ip in "${!ip_last_hot[@]}"; do
+        if (( now - ip_last_hot[$ip] > 2 * ALERT_WINDOW )); then
+            unset "ip_streak[$ip]" "ip_last_hot[$ip]" "ip_sustained[$ip]"
         fi
     done
 
     # Count this drop
     if [[ -z "${ip_counts[$src_ip]:-}" ]]; then
         ip_counts[$src_ip]=0
+        ip_hits[$src_ip]=0
         ip_first_seen[$src_ip]=$now
         (( unique_ips++ )) || true
     fi
     (( ip_counts[$src_ip]++ )) || true
     (( total_drops++ )) || true
+    (( probe )) && { (( ip_hits[$src_ip]++ )) || true; }
 
-    log_event "DROP src=$src_ip proto=$proto dpt=$dpt"
+    log_event "DROP src=$src_ip proto=$proto dpt=$dpt$( (( probe )) && echo ' probe')"
 
-    # Alert if threshold crossed for this IP
+    # Alert if threshold crossed for this IP (silent: usually LAN chatter)
     if (( ip_counts[$src_ip] >= ALERT_THRESHOLD )) && [[ -z "${ip_alerted[$src_ip]:-}" ]]; then
         ip_alerted[$src_ip]=1
         notify critical "Port Scan Detected" "Source: $src_ip\n${ip_counts[$src_ip]} probes in ${ALERT_WINDOW}s (${proto})"
         log_event "ALERT port_scan src=$src_ip count=${ip_counts[$src_ip]}"
+    fi
+
+    # A hot window: enough real probes from this source. Enough consecutive
+    # hot windows make a sustained attack, the one drop alert that sounds.
+    if (( ip_hits[$src_ip] >= ALERT_THRESHOLD )) && [[ -z "${ip_hot[$src_ip]:-}" ]]; then
+        ip_hot[$src_ip]=1
+        ip_last_hot[$src_ip]=$now
+        ip_streak[$src_ip]=$(( ${ip_streak[$src_ip]:-0} + 1 ))
+        if (( ip_streak[$src_ip] >= SUSTAIN_WINDOWS )) && [[ -z "${ip_sustained[$src_ip]:-}" ]]; then
+            ip_sustained[$src_ip]=1
+            (( sustained_attacks++ )) || true
+            notify critical "Sustained Attack" "Source: $src_ip\nProbing nonstop for $(( ip_streak[$src_ip] * ALERT_WINDOW / 60 )) min (${proto}, latest port ${dpt})\nInvestigate: probesource $src_ip" loud
+            log_event "ALERT sustained_attack src=$src_ip windows=${ip_streak[$src_ip]}"
+        fi
     fi
 }
 
@@ -158,7 +220,7 @@ check_arp_spoofing() {
         echo "$gateway_ip" > "$LOG_DIR/gateway_ip"
         log_event "ARP gateway=$gateway_ip mac=$gateway_mac (stored)"
     elif [[ "$stored_mac" != "$gateway_mac" ]]; then
-        notify critical "ARP Spoofing Detected!" "Gateway $gateway_ip MAC changed!\nWas: $stored_mac\nNow: $gateway_mac\n\nSomeone may be intercepting your traffic!"
+        notify critical "ARP Spoofing Detected!" "Gateway $gateway_ip MAC changed!\nWas: $stored_mac\nNow: $gateway_mac\n\nSomeone may be intercepting your traffic!" loud
         log_event "ALERT arp_spoof gateway=$gateway_ip old=$stored_mac new=$gateway_mac"
         echo "$gateway_mac" > "$LOG_DIR/gateway_mac"
     fi
@@ -204,7 +266,8 @@ while true; do
             dst_ip=$(echo "$line" | grep -oP 'DST=\K[0-9a-fA-F.:]+' || echo "")
 
             if ! is_noise "$src_ip" "$dst_ip" "$dpt"; then
-                process_drop "$src_ip" "$proto" "$dpt"
+                probe=0; is_probe "$line" "$proto" "$dpt" && probe=1
+                process_drop "$src_ip" "$proto" "$dpt" "$probe"
             fi
         fi
     elif (( rc < 128 )); then
@@ -228,7 +291,9 @@ while true; do
 
     # Periodic summary
     if (( total_drops > 0 && now - last_summary >= SUMMARY_INTERVAL )); then
-        notify low "NetWatch Summary" "${total_drops} dropped packets from ${unique_ips} source(s) in last ${SUMMARY_INTERVAL}s"
+        summary="${total_drops} dropped packets from ${unique_ips} source(s) in last ${SUMMARY_INTERVAL}s"
+        (( sustained_attacks )) && summary+="\n${sustained_attacks} sustained attack(s) -- see the alert"
+        notify low "NetWatch Summary" "$summary"
         log_event "SUMMARY drops=$total_drops unique_ips=$unique_ips"
         last_summary=$now
         reset_counters

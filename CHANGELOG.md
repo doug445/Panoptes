@@ -5,6 +5,22 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`netwatch` is silent unless an attack is real and sustained.** A busy LAN
+  keeps the firewall dropping all day — discovery replies from TVs and
+  speakers to random high UDP ports, late TCP ACKs from a CDN after conntrack
+  forgot the flow — and every summary and per-minute "port scan" popup beeped.
+  They now carry the `suppress-sound` hint at an urgency below critical (what
+  Cinnamon needs to stay quiet, as in `persistwatch`). Two alerts still sound
+  and stay on screen until dismissed: a **sustained attack**, one source
+  sending five or more real probes (a TCP SYN, or UDP to a port below 32768)
+  in each of three consecutive minutes, raised once per episode and re-armed
+  after two quiet minutes; and an **ARP spoof**. Drops that count as probes
+  are marked `probe` in the event log, and the summary mentions any sustained
+  attack in its period. `NETWATCH_SOUND=1` makes every notification sound
+  again.
+
 ## [3.1.3] — 2026-10-27
 
 One host firewall, the distribution's own, and the tools that read it.
