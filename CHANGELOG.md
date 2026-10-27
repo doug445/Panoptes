@@ -5,6 +5,25 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [3.1.6] — 2026-10-27
+
+The tray's Proton VPN Disconnect works again after an install.
+
+### Fixed
+
+- **"Proton VPN: Disconnect → rebuild WARP" did nothing after `sudo
+  ./install.sh`.** The installer restarted the trays with `runuser`, which left
+  them inside root's sudo login session. polkit lets only an active desktop
+  session control NetworkManager, so every disconnect was refused ("Not
+  authorized to deactivate connections"), Proton VPN stayed up, and "Rebuild
+  WARP" then refused to run beside it. The installer now starts the trays in
+  the user's own systemd manager (`systemd-run --user`, as `panoptes-warp-tray`
+  and `panoptes-dns-tray`), where NetworkManager control is allowed. Without a
+  systemd user manager it falls back to the old launch and says to log out and
+  in before using the Proton VPN items.
+- A non-root `./install.sh` no longer prints "Permission denied" for every
+  process it cannot read while looking for the desktop session.
+
 ## [3.1.5] — 2026-10-27
 
 The trays come back after an install on Plasma Wayland.
@@ -723,6 +742,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[3.1.6]: https://github.com/doug445/Panoptes/releases/tag/v3.1.6
 [3.1.5]: https://github.com/doug445/Panoptes/releases/tag/v3.1.5
 [3.1.4]: https://github.com/doug445/Panoptes/releases/tag/v3.1.4
 [3.1.3]: https://github.com/doug445/Panoptes/releases/tag/v3.1.3
