@@ -331,14 +331,22 @@ fi
 # Prints the graphical-session environment of $1 as NAME=value lines, taken
 # from a running tray if there is one, else from any process of theirs that
 # has a display. Returns 1 when the user has no session.
+#
+# XDG_CURRENT_DESKTOP is load-bearing: the trays pick Qt (KDE) or GTK from it,
+# and the GTK fallback is invisible on Plasma Wayland. The first pass only
+# takes a process that has it, so a tray an older install started without it
+# cannot hand its broken environment on; the second pass is for bare WMs.
 session_env() {
-    local u=$1 p e
-    for p in $(pgrep -u "$u" -f '/(warp|dns)-tray( |$)') $(pgrep -u "$u"); do
-        e="$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null \
-             | grep -E '^(DISPLAY|WAYLAND_DISPLAY|XAUTHORITY|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR)=')" || continue
-        grep -qE '^(DISPLAY|WAYLAND_DISPLAY)=' <<<"$e" || continue
-        grep -q '^DBUS_SESSION_BUS_ADDRESS=' <<<"$e" || continue
-        printf '%s\n' "$e"; return 0
+    local u=$1 p e pass
+    for pass in desktop any; do
+        for p in $(pgrep -u "$u" -f '/(warp|dns)-tray( |$)') $(pgrep -u "$u"); do
+            e="$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null \
+                 | grep -E '^(DISPLAY|WAYLAND_DISPLAY|XAUTHORITY|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|XDG_CURRENT_DESKTOP|XDG_SESSION_DESKTOP|XDG_SESSION_TYPE|XDG_DATA_DIRS|KDE_FULL_SESSION)=')" || continue
+            grep -qE '^(DISPLAY|WAYLAND_DISPLAY)=' <<<"$e" || continue
+            grep -q '^DBUS_SESSION_BUS_ADDRESS=' <<<"$e" || continue
+            [ "$pass" = desktop ] && ! grep -q '^XDG_CURRENT_DESKTOP=.' <<<"$e" && continue
+            printf '%s\n' "$e"; return 0
+        done
     done
     return 1
 }

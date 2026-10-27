@@ -5,6 +5,17 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The trays vanished after `install.sh` restarted them on Plasma Wayland.**
+  The restart passed the trays only the display, D-Bus and runtime-dir
+  variables, not `XDG_CURRENT_DESKTOP`, which `dns-tray` and `warp-tray` use to
+  choose Qt (KDE) or GTK. They took the GTK fallback, whose status icon Plasma
+  on Wayland never shows: running, but invisible. The restart now also passes
+  `XDG_CURRENT_DESKTOP`, `XDG_SESSION_DESKTOP`, `XDG_SESSION_TYPE`,
+  `XDG_DATA_DIRS` and `KDE_FULL_SESSION`, and prefers a process that has a
+  desktop set, so a tray started without one cannot hand on its environment.
+
 ## [3.1.4] — 2026-10-27
 
 netwatch keeps quiet unless an attack is real and sustained.
