@@ -466,6 +466,25 @@ rpm_bootstrap() {
     ok "$RPM_REPO_FILE installed by Proton's package"
 }
 
+# rpm runs glibc's ldconfig file trigger after every %posttrans, so a
+# %posttrans that starts a service can beat the linker cache: proton-vpn-daemon
+# starts me.proton.vpn.split_tunneling, whose bcc import needs libclang-cpp
+# from /usr/lib64/llvm21 — not yet in the cache when clang21-libs arrives in
+# the same transaction. dnf then calls the whole transaction failed although
+# every package is in. Check what landed rather than trust the exit status.
+rpm_recover_scriptlet() {  # rpm_recover_scriptlet "pkg pkg ..."
+    local unit=me.proton.vpn.split_tunneling.service
+    [ -z "$(missing_of "$1")" ] || return 1
+    warn "dnf reported a failed scriptlet, but every package is installed — finishing its job"
+    $SUDO ldconfig || return 1
+    systemctl cat "$unit" >/dev/null 2>&1 || return 0
+    $SUDO systemctl reset-failed "$unit" 2>/dev/null
+    $SUDO systemctl enable "$unit" >/dev/null 2>&1
+    $SUDO systemctl restart "$unit" || return 1
+    systemctl is-active --quiet "$unit" || return 1
+    ok "$unit running"
+}
+
 rpm_install() {
     local want="$RPM_APP" m
     [ "$CLI" -eq 1 ] && want="$want $RPM_CLI"
@@ -477,7 +496,7 @@ rpm_install() {
     confirm_pm
     local dnf=dnf; command -v dnf5 >/dev/null 2>&1 && dnf=dnf5
     # shellcheck disable=SC2086
-    run $SUDO "$dnf" install -y $m || die "package install failed"
+    run $SUDO "$dnf" install -y $m || rpm_recover_scriptlet "$m" || die "package install failed"
     [ "$DRY" -eq 1 ] || ok "installed"
 }
 
