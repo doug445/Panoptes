@@ -55,8 +55,8 @@
 #   sudo ./proton-setup.sh --uninstall  remove the client, the CLI and the repository
 #
 # Supported: Debian/Ubuntu family (Mint, Pop!_OS, LMDE included) and Fedora
-# natively; the Arch family through an AUR helper already on the machine (yay,
-# paru or pamac — makepkg refuses root, so it runs as the invoking user);
+# natively; the Arch family from Arch's own extra repository with pacman
+# (proton-vpn-gtk-app and proton-vpn-cli);
 # anything with Flatpak through Flathub (no CLI in that build).
 
 set -uo pipefail
@@ -91,8 +91,6 @@ rpm_key_fpr_for() {
 RPM_KEY_FPR=""
 RPM_REPO_FILE=/etc/yum.repos.d/protonvpn-stable.repo
 FLATPAK_ID=com.protonvpn.www
-AUR_APP=proton-vpn-gtk-app
-AUR_CLI=proton-vpn-cli
 
 # Package names per family. The metapackage pulls the app, the daemon and the
 # NetworkManager plug-ins; the CLI is separate; the tray bits are what Proton's
@@ -103,6 +101,8 @@ DEB_TRAY="libayatana-appindicator3-1 gir1.2-ayatanaappindicator3-0.1"
 RPM_APP="proton-vpn-gnome-desktop"
 RPM_CLI="proton-vpn-cli"
 RPM_TRAY="libappindicator-gtk3"
+ARCH_APP="proton-vpn-gtk-app"
+ARCH_CLI="proton-vpn-cli"
 ARCH_TRAY="libappindicator-gtk3"
 
 # ------------------------------------------------------------------ arguments
@@ -169,13 +169,6 @@ case "$FAMILY:$DISTRO_ID" in
 esac
 [ "$FAMILY" = fedora ] && RPM_KEY_FPR=$(rpm_key_fpr_for "$VER_ID")
 FLATPAK_REASON="${FLATPAK_REASON:-}"
-
-# The user who will run the app (makepkg and flatpak --user care; root does not).
-RUN_USER="${SUDO_USER:-$(id -un)}"
-[ "$RUN_USER" = root ] && RUN_USER=""
-as_user() {  # as_user CMD... — run as the invoking user when we are root
-    if [ "$(id -u)" -eq 0 ] && [ -n "$RUN_USER" ]; then runuser -u "$RUN_USER" -- "$@"; else "$@"; fi
-}
 
 # ------------------------------------------------------------------ probes
 deb_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
@@ -271,7 +264,7 @@ cli_version() {
     case "$FAMILY" in
         debian) dpkg-query -W -f='${Version}' proton-vpn-cli 2>/dev/null ;;
         fedora) rpm -q --qf '%{VERSION}' proton-vpn-cli 2>/dev/null ;;
-        arch)   pacman -Q "$AUR_CLI" 2>/dev/null | awk '{print $2}' ;;
+        arch)   pacman -Q "$ARCH_CLI" 2>/dev/null | awk '{print $2}' ;;
         *)      echo installed ;;
     esac
 }
@@ -279,7 +272,7 @@ app_version() {
     case "$FAMILY" in
         debian) dpkg-query -W -f='${Version}' proton-vpn-gtk-app 2>/dev/null ;;
         fedora) rpm -q --qf '%{VERSION}' proton-vpn-gtk-app 2>/dev/null ;;
-        arch)   pacman -Q "$AUR_APP" 2>/dev/null | awk '{print $2}' ;;
+        arch)   pacman -Q "$ARCH_APP" 2>/dev/null | awk '{print $2}' ;;
     esac
     flatpak_installed && flatpak info "$FLATPAK_ID" 2>/dev/null | awk -F': *' '/^ *Version/{print "flatpak " $2; exit}'
 }
@@ -354,8 +347,8 @@ do_uninstall() {
             run $SUDO "$dnf" remove -y 'proton-vpn-*' 'python3-proton-*' protonvpn-stable-release
             run $SUDO rm -f "$RPM_REPO_FILE" ;;
         arch)
-            arch_installed "$AUR_APP" && run $SUDO pacman -Rns --noconfirm "$AUR_APP"
-            arch_installed "$AUR_CLI" && run $SUDO pacman -Rns --noconfirm "$AUR_CLI" ;;
+            arch_installed "$ARCH_APP" && run $SUDO pacman -Rns --noconfirm "$ARCH_APP"
+            arch_installed "$ARCH_CLI" && run $SUDO pacman -Rns --noconfirm "$ARCH_CLI" ;;
     esac
     [ "$CHANGED" -eq 1 ] && ok "removed" || echo "  nothing to remove"
     echo "  Your Proton account and any NetworkManager profiles you imported were left alone."
@@ -500,34 +493,19 @@ rpm_install() {
     [ "$DRY" -eq 1 ] || ok "installed"
 }
 
-# ------------------------------------------------------------------ arch (AUR)
-aur_install() {
-    local helper="" want="" m
-    for h in paru yay pamac; do command -v "$h" >/dev/null 2>&1 && { helper=$h; break; }; done
-    [ -n "$RUN_USER" ] || [ -z "$helper" ] || warn "running as root with no invoking user — makepkg will refuse; run with sudo from your account"
-    if [ "$TRAY" -eq 1 ]; then
-        m=$(missing_of "$ARCH_TRAY")
-        if [ -z "$m" ]; then same "packages: $ARCH_TRAY"
-        else say "Installing: $m"; confirm_pm
-             # shellcheck disable=SC2086
-             run $SUDO pacman -S --needed --noconfirm $m || die "pacman failed"; fi
-    fi
-    want="$AUR_APP"; [ "$CLI" -eq 1 ] && want="$want $AUR_CLI"
+# ------------------------------------------------------------------ arch
+# Arch ships the client in its official extra repository, signed by the Arch
+# keyring pacman already trusts, so there is no third-party repo or key to pin.
+pacman_install() {
+    local want m
+    want="$ARCH_APP"; [ "$CLI" -eq 1 ] && want="$want $ARCH_CLI"
+    [ "$TRAY" -eq 1 ] && want="$want $ARCH_TRAY"
     m=$(missing_of "$want")
-    if [ -z "$m" ]; then same "AUR packages: $want"; return 0; fi
-    if [ -z "$helper" ]; then
-        warn "no AUR helper (paru, yay or pamac) found — build these yourself: $m"
-        warn "or re-run with --flatpak"
-        return 1
-    fi
-    say "Building from the AUR with $helper: $m"
+    if [ -z "$m" ]; then same "packages: $want"; return 0; fi
+    say "Installing: $m"
     confirm_pm
-    case "$helper" in
-        pamac) # shellcheck disable=SC2086
-               run as_user pamac build --no-confirm $m || die "pamac build failed" ;;
-        *)     # shellcheck disable=SC2086
-               run as_user "$helper" -S --needed --noconfirm $m || die "$helper failed" ;;
-    esac
+    # shellcheck disable=SC2086
+    run $SUDO pacman -S --needed --noconfirm $m || die "pacman failed"
     [ "$DRY" -eq 1 ] || ok "installed"
 }
 
@@ -556,7 +534,7 @@ else
     case "$FAMILY" in
         debian) apt_bootstrap; apt_install ;;
         fedora) rpm_bootstrap; rpm_install ;;
-        arch)   aur_install ;;
+        arch)   pacman_install ;;
     esac
 fi
 
