@@ -5,6 +5,25 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [3.1.8] — 2026-10-27
+
+Proton VPN installs on Fedora boxes that lack LLVM 21.
+
+### Fixed
+
+- **"package install failed" for Proton VPN on a fresh Fedora 44.**
+  `proton-vpn-daemon`'s `%posttrans` starts
+  `me.proton.vpn.split_tunneling.service`, whose `bcc` import needs
+  `libclang-cpp.so.21.1` from `/usr/lib64/llvm21/lib64`. When `clang21-libs`
+  arrives in the same transaction, that library is not in the linker cache
+  yet — rpm runs glibc's `ldconfig` file trigger after every `%posttrans` —
+  so the daemon failed to start, the scriptlet exited 1, and dnf5 called the
+  whole transaction failed although every package was installed. A second
+  run then found nothing to do. `proton-setup.sh` now checks what actually
+  landed when dnf fails: if every package is in, it runs `ldconfig`, enables
+  and restarts the daemon, and carries on once it is running. A package that
+  really did not install still stops the run.
+
 ## [3.1.7] — 2026-10-27
 
 OpenSnitch installs on Fedora boxes with a hardened `dnf.conf`.
@@ -755,6 +774,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[3.1.8]: https://github.com/doug445/Panoptes/releases/tag/v3.1.8
 [3.1.7]: https://github.com/doug445/Panoptes/releases/tag/v3.1.7
 [3.1.6]: https://github.com/doug445/Panoptes/releases/tag/v3.1.6
 [3.1.5]: https://github.com/doug445/Panoptes/releases/tag/v3.1.5
