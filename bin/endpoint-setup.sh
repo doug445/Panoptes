@@ -208,8 +208,8 @@ pm_cmd() {  # the family's non-interactive install command, as an array in PM_CM
     esac
 }
 pm_install() {  # pm_install "pkg pkg" | pm_install --files /path/a.rpm ...
-    local -a pkgs
-    if [ "$1" = --files ]; then shift; pkgs=("$@")
+    local -a pkgs; local files=0
+    if [ "$1" = --files ]; then shift; pkgs=("$@"); files=1
     else
         local m; m=$(missing_of "$1")
         if [ -z "$m" ]; then same "packages: $1"; return 0; fi
@@ -219,6 +219,10 @@ pm_install() {  # pm_install "pkg pkg" | pm_install --files /path/a.rpm ...
     if [ "$FAMILY" = debian ] && [ "${NEED_REFRESH:-0}" -eq 1 ]; then run $SUDO apt-get update -qq || die "apt-get update failed"; NEED_REFRESH=0; fi
     [ "$FAMILY" = suse ] && [ "${NEED_REFRESH:-0}" -eq 1 ] && { run $SUDO zypper --non-interactive --gpg-auto-import-keys refresh >/dev/null || die "zypper refresh failed"; NEED_REFRESH=0; }
     pm_cmd
+    # --files are only ever passed after their SHA-512 matched a signed checksum
+    # list; upstream does not sign the RPMs themselves, so a hardened
+    # localpkg_gpgcheck=1 would refuse them. Scoped to this one transaction.
+    [ "$FAMILY" = fedora ] && [ "$files" -eq 1 ] && PM_CMD+=(--setopt=localpkg_gpgcheck=0)
     run $SUDO "${PM_CMD[@]}" "${pkgs[@]}" || die "package install failed"
     [ "$DRY" -eq 1 ] || ok "installed"
 }
