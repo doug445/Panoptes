@@ -5,6 +5,15 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **OpenSnitch failed to install on Fedora with `localpkg_gpgcheck=1`.**
+  Upstream does not sign its RPMs, so a hardened `dnf.conf` refused them
+  ("The repository does not have any OpenPGP keys configured"). The packages
+  are already verified against upstream's signed SHA-512 list before install,
+  so `endpoint-setup.sh` now passes `--setopt=localpkg_gpgcheck=0` to that one
+  dnf transaction only; the system setting is left untouched.
+
 ## [3.1.6] — 2026-10-27
 
 The tray's Proton VPN Disconnect works again after an install.
