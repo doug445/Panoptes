@@ -5,6 +5,10 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [3.1.7] — 2026-10-27
+
+OpenSnitch installs on Fedora boxes with a hardened `dnf.conf`.
+
 ### Fixed
 
 - **OpenSnitch failed to install on Fedora with `localpkg_gpgcheck=1`.**
@@ -751,6 +755,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[3.1.7]: https://github.com/doug445/Panoptes/releases/tag/v3.1.7
 [3.1.6]: https://github.com/doug445/Panoptes/releases/tag/v3.1.6
 [3.1.5]: https://github.com/doug445/Panoptes/releases/tag/v3.1.5
 [3.1.4]: https://github.com/doug445/Panoptes/releases/tag/v3.1.4
