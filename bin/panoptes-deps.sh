@@ -119,8 +119,8 @@ nghttp2-dev|pc:libnghttp2|build|no|libnghttp2-devel|libnghttp2-dev|libnghttp2|li
 idn2-dev|pc:libidn2|build|no|libidn2-devel|libidn2-dev|libidn2|libidn2-devel|libidn2-dev
 psl-dev|pc:libpsl|build|no|libpsl-devel|libpsl-dev|libpsl|libpsl-devel|libpsl-dev
 warp-cli|cmd:warp-cli|warp|yes|-|-|-|-|-
-protonvpn-app|cmd:protonvpn-app|proton|yes|-|-|-|-|-
-protonvpn-cli|cmd:protonvpn|proton|yes|-|-|-|-|-
+protonvpn-app|cmd:protonvpn-app|proton|yes|-|-|proton-vpn-gtk-app|-|-
+protonvpn-cli|cmd:protonvpn|proton|yes|-|-|proton-vpn-cli|-|-
 opensnitch|cmd:opensnitchd|endpoint|yes|-|opensnitch|opensnitch|-|-
 osquery|cmd:osqueryi|endpoint|yes|-|-|osquery|-|-
 TABLE
