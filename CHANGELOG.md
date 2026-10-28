@@ -5,6 +5,24 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [3.1.9] — 2026-10-27
+
+Proton VPN installs on Arch from the official repositories.
+
+### Fixed
+
+- **"no distro packages Proton VPN" on Arch and EndeavourOS.** Arch now
+  ships the client in its official `extra` repository as
+  `proton-vpn-gtk-app` and `proton-vpn-cli`, but the requirements manifest
+  in `panoptes-deps.sh` still listed no Arch package for either, so
+  `install.sh --with-optional` reported both as unavailable. The manifest now
+  names them.
+- **`proton-setup.sh` needed an AUR helper on Arch.** It built the client
+  with yay, paru or pamac and gave up without one. It now installs the app,
+  the CLI and `libappindicator-gtk3` with `pacman -S --needed`, signed by the
+  Arch keyring pacman already trusts. `--uninstall` and `--check` use the
+  same package names.
+
 ## [3.1.8] — 2026-10-27
 
 Proton VPN installs on Fedora boxes that lack LLVM 21.
@@ -774,6 +792,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[3.1.9]: https://github.com/doug445/Panoptes/releases/tag/v3.1.9
 [3.1.8]: https://github.com/doug445/Panoptes/releases/tag/v3.1.8
 [3.1.7]: https://github.com/doug445/Panoptes/releases/tag/v3.1.7
 [3.1.6]: https://github.com/doug445/Panoptes/releases/tag/v3.1.6
