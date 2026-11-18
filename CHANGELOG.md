@@ -5,6 +5,41 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [3.1.10] — 2026-11-18
+
+The tools are clean at ShellCheck's style level, and CI now holds them there.
+
+### Fixed
+
+- **`probesource` opened a second log viewer after Esc.** The "tail" items
+  in the log browser and main menu ran `dialog --tailbox … || textbox`;
+  leaving the tailbox with Esc exits 255, so the textbox opened behind it.
+- **`endpoint-setup.sh --check` printed "Permission denied"** for the osquery
+  results log when run without root, instead of the intended `? rows
+  logged`: the input redirect was opened before stderr was silenced.
+
+### Changed
+
+- Every `A && ok || warn` chain in `endpoint-setup.sh`, `netmaster`,
+  `proton-fallback` and `warp-killswitch` is now an `if`/`else`, so the
+  warning can no longer follow a success. `netmaster` quotes its command
+  variables where it passes them as arguments. Intentional word splitting,
+  functions called by name and `netmaster`'s P1 fallback carry a
+  `shellcheck disable=` with the reason.
+- Python tools: `contextlib.suppress` for try/except/pass, list unpacking
+  instead of concatenation, and the tray's Status icon written as an escape
+  like the labels around it.
+
+### Repository
+
+- CI installs ShellCheck 0.11.0 from upstream, checked against its SHA-256,
+  instead of Ubuntu's 0.9.0, and fails at style level (SC2016 aside: every
+  hit is an awk program or literal help text). Ruff's gate adds the bugbear,
+  simplify, ruff, perf, pylint error/warning, pyupgrade, blind-except,
+  import-order, comprehension, pie and return rule sets to the defaults.
+- `actions/setup-python` 5.6.0 → 7.1.0 (Dependabot, #4); the checkout pin
+  comments name the exact release, v7.0.1.
+
 ## [3.1.9] — 2026-10-27
 
 Proton VPN installs on Arch from the official repositories.
@@ -792,6 +827,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[3.1.10]: https://github.com/doug445/Panoptes/releases/tag/v3.1.10
 [3.1.9]: https://github.com/doug445/Panoptes/releases/tag/v3.1.9
 [3.1.8]: https://github.com/doug445/Panoptes/releases/tag/v3.1.8
 [3.1.7]: https://github.com/doug445/Panoptes/releases/tag/v3.1.7
