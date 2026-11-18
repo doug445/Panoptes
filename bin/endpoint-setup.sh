@@ -318,7 +318,8 @@ install_opensnitch() {
     run $SUDO install -d -m 0755 "$OSN_RULES" >/dev/null 2>&1
     seed_opensnitch_rules
     if [ "$(unit_state opensnitch)" = "active/enabled" ]; then same "opensnitch.service enabled and running"
-    else run $SUDO systemctl enable --now opensnitch >/dev/null 2>&1 && ok "opensnitch.service enabled and started" || warn "could not enable opensnitch.service"; fi
+    elif run $SUDO systemctl enable --now opensnitch >/dev/null 2>&1; then ok "opensnitch.service enabled and started"
+    else warn "could not enable opensnitch.service"; fi
     # The prompt UI must run in the session or the daemon falls back to its
     # default action. Ubuntu's package ships no autostart entry; upstream's does.
     if [ -n "$RUN_USER" ] && [ ! -f "$OSN_UI_AUTOSTART" ]; then
@@ -513,7 +514,8 @@ install_osquery() {
     write_osquery_pack
     write_osquery_conf
     if [ "$(unit_state osqueryd)" = "active/enabled" ]; then same "osqueryd.service enabled and running"
-    else run $SUDO systemctl enable --now osqueryd >/dev/null 2>&1 && ok "osqueryd.service enabled and started" || warn "could not enable osqueryd.service"; fi
+    elif run $SUDO systemctl enable --now osqueryd >/dev/null 2>&1; then ok "osqueryd.service enabled and started"
+    else warn "could not enable osqueryd.service"; fi
     # persistwatch: the BlockBlock half — notify on new rows from the pack.
     if [ -x "$PW_BIN" ]; then
         put_file "$PW_UNIT" 0644 <<UNIT
@@ -535,7 +537,8 @@ WantedBy=multi-user.target
 UNIT
         [ "$DRY" -eq 0 ] && $SUDO systemctl daemon-reload >/dev/null 2>&1
         if [ "$(unit_state persistwatch)" = "active/enabled" ]; then same "persistwatch.service enabled and running"
-        else run $SUDO systemctl enable --now persistwatch >/dev/null 2>&1 && ok "persistwatch.service enabled and started" || warn "could not enable persistwatch.service"; fi
+        elif run $SUDO systemctl enable --now persistwatch >/dev/null 2>&1; then ok "persistwatch.service enabled and started"
+        else warn "could not enable persistwatch.service"; fi
     else
         warn "$PW_BIN is not installed (run Panoptes install.sh); persistwatch.service not written"
     fi
@@ -553,21 +556,23 @@ report() {
             n=$(find "$OSN_RULES" -maxdepth 1 -name "000-$MARK-*.json" 2>/dev/null | wc -l)
             printf '  %-14s %s\n' "rules" "$n suite rule(s) in $OSN_RULES"
             if [ -n "$RUN_USER" ]; then
-                as_user pgrep -u "$RUN_USER" -f opensnitch-ui >/dev/null 2>&1 && ok "opensnitch-ui running for $RUN_USER" || warn "opensnitch-ui not running for $RUN_USER — prompts fall back to the daemon's default action (allow)"
+                if as_user pgrep -u "$RUN_USER" -f opensnitch-ui >/dev/null 2>&1; then ok "opensnitch-ui running for $RUN_USER"
+                else warn "opensnitch-ui not running for $RUN_USER — prompts fall back to the daemon's default action (allow)"; fi
             fi
         else warn "OpenSnitch    not installed"; short=1; fi
     fi
     if [ "$OSQ" -eq 1 ]; then
         if have_osquery; then
             ok "osquery       $(osqueryi --version 2>/dev/null | awk '{print $NF}')   osqueryd $(unit_state osqueryd)"
-            [ -f "$OSQ_PACK" ] && ok "pack          $OSQ_PACK" || { warn "pack          missing"; short=1; }
+            if [ -f "$OSQ_PACK" ]; then ok "pack          $OSQ_PACK"
+            else warn "pack          missing"; short=1; fi
             if [ -f "$OSQ_CONF" ]; then
                 if [ -f "$OSQ_CONF_COPY" ] && cmp -s "$OSQ_CONF" "$OSQ_CONF_COPY"; then ok "config        $OSQ_CONF (Panoptes)"
                 elif grep -q "panoptes-persistence" "$OSQ_CONF" 2>/dev/null; then ok "config        $OSQ_CONF (yours, loads the pack)"
                 else warn "config        $OSQ_CONF (yours) does not load the pack"; short=1; fi
             else warn "config        missing"; short=1; fi
             printf '  %-14s %s\n' "persistwatch" "$(unit_state persistwatch)"
-            [ -f "$OSQ_LOG_DIR/osqueryd.results.log" ] && printf '  %-14s %s rows logged\n' "results" "$(wc -l < "$OSQ_LOG_DIR/osqueryd.results.log" 2>/dev/null || echo '?')"
+            [ -f "$OSQ_LOG_DIR/osqueryd.results.log" ] && printf '  %-14s %s rows logged\n' "results" "$(wc -l 2>/dev/null < "$OSQ_LOG_DIR/osqueryd.results.log" || echo '?')"
         else warn "osquery       not installed"; short=1; fi
     fi
     echo

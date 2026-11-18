@@ -95,7 +95,7 @@ def osqueryi():
 
 def run_query(base, sql):
     try:
-        res = subprocess.run(base + ['--json', sql], capture_output=True, text=True, check=False, timeout=120)
+        res = subprocess.run([*base, '--json', sql], capture_output=True, text=True, check=False, timeout=120)
     except (OSError, subprocess.SubprocessError) as e:
         return None, str(e)
     if res.returncode != 0:

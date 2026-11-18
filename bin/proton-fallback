@@ -163,7 +163,8 @@ unpark_warp() {
     [ "$(ks_state)" = parked ] || return 0
     say "Rebuilding WARP"
     notify "Proton VPN" "Proton VPN is off — rebuilding WARP…" network-vpn
-    run $SUDO_N "$KILLSWITCH" unpark >/dev/null 2>&1 && ok "WARP rebuilt" || { fail "warp-killswitch unpark failed — right-click the tray: Rebuild"; return 1; }
+    if run $SUDO_N "$KILLSWITCH" unpark >/dev/null 2>&1; then ok "WARP rebuilt"
+    else fail "warp-killswitch unpark failed — right-click the tray: Rebuild"; return 1; fi
 }
 
 # -------------------------------------------------------------- detection

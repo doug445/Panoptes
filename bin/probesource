@@ -537,7 +537,8 @@ ids_by_kind() {
 planned_tactics() {
     local mode="$1" rounds="${2:-1}" sel="${3:-}" r
     case "$mode" in
-        S) printf '%s\n' $sel ;;
+        S) # shellcheck disable=SC2086  # $sel is a space-separated id list
+           printf '%s\n' $sel ;;
         P) ids_by_kind "P" ;;
         A) ids_by_kind "PA" ;;
         F) ids_by_kind "PAX" ;;
@@ -1070,9 +1071,13 @@ browse_logs() {
                 3>&1 1>&2 2>&3) || continue
         case "$act" in
             V) "$UI" --textbox "$target" 32 110 ;;
-            T) [[ "$UI" == "dialog" ]] \
-                 && dialog --title "tail $target" --tailbox "$target" 32 110 \
-                 || "$UI" --textbox "$target" 32 110 ;;
+            # if/else, not && ||: Esc out of the tailbox exits 255 and would
+            # open the textbox behind it.
+            T) if [[ "$UI" == "dialog" ]]; then
+                   dialog --title "tail $target" --tailbox "$target" 32 110
+               else
+                   "$UI" --textbox "$target" 32 110
+               fi ;;
             D) "$UI" --yesno "Delete $(basename "$target")?" 7 60 \
                  && rm -f "$target" ;;
             B) continue ;;
@@ -1126,7 +1131,7 @@ investigate() {
     total_eta=$(sum_eta "${planned[@]}")
 
     # Launch the tactic batch in a background subshell.
-    # shellcheck disable=SC2046  # $tactics and ids_by_kind emit id LISTS;
+    # shellcheck disable=SC2046,SC2086  # $tactics and ids_by_kind emit id LISTS;
     # word splitting into separate run_set arguments is the intent
     case "$mode" in
         S)  ( run_set "$ip" $tactics; \
@@ -1229,9 +1234,11 @@ main() {
             R) resume_scan ;;
             L) browse_logs ;;
             S) summary_from_log ;;
-            M) [[ "$UI" == "dialog" ]] \
-                 && dialog --title "tail $MASTER_LOG" --tailbox "$MASTER_LOG" 32 110 \
-                 || "$UI" --textbox "$MASTER_LOG" 32 110 ;;
+            M) if [[ "$UI" == "dialog" ]]; then
+                   dialog --title "tail $MASTER_LOG" --tailbox "$MASTER_LOG" 32 110
+               else
+                   "$UI" --textbox "$MASTER_LOG" 32 110
+               fi ;;
             U) update_oui_db ;;
             Q) break ;;
         esac

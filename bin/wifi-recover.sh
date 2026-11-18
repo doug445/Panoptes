@@ -375,7 +375,7 @@ if [[ $DO_REPAIR -eq 1 ]]; then
   section "[E] neutralize macchanger system defaults if hostile"
   if [[ -f /etc/default/macchanger ]]; then
     if grep -qE '^(ENABLE_ON_POST_UP_DOWN|RUN_DAEMON|RANDOMIZE)=true' /etc/default/macchanger; then
-      run cp -a /etc/default/macchanger /etc/default/macchanger.bak-$STAMP
+      run cp -a /etc/default/macchanger "/etc/default/macchanger.bak-$STAMP"
       run sed -i -E 's/^(ENABLE_ON_POST_UP_DOWN|RUN_DAEMON|RANDOMIZE)=true/\1=false/' /etc/default/macchanger
       note "neutralized — backup at /etc/default/macchanger.bak-$STAMP"
     fi

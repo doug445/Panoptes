@@ -45,6 +45,7 @@
 #   persistwatch --once     process whatever is new, then exit
 #   persistwatch --test     send a test notification and exit
 #   persistwatch --from-start   forget the saved position and re-read the whole log
+import contextlib
 import json
 import os
 import subprocess
@@ -128,11 +129,9 @@ def notify(title, body, urgency='critical'):
         cmd = ['runuser', '-u', user, '--', 'env'] + [f'{k}={v}' for k, v in env.items()] + [
             'notify-send', '-a', 'Panoptes persistence', '-u', urgency,
             '-i', 'dialog-warning'] + hints + [title, body]
-        try:
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            check=False, timeout=NOTIFY_TIMEOUT)
-        except (OSError, subprocess.SubprocessError):
-            pass
 
 
 def describe(query, c):

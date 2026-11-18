@@ -43,6 +43,7 @@ ok()   { printf '  ✓ %s\n' "$*"; }
 bold "host"
 note "$(uname -n) — $(uname -srm)"
 if [ -r /etc/os-release ]; then
+  # shellcheck source=/dev/null
   . /etc/os-release
   note "${PRETTY_NAME:-$NAME $VERSION_ID} (id=${ID:-?}${ID_LIKE:+, like=$ID_LIKE})"
 fi

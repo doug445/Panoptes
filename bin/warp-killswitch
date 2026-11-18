@@ -128,6 +128,7 @@ notify() {
     command -v notify-send >/dev/null 2>&1 || return 0
     while read -r line; do
         # SESSION UID USER SEAT LEADER CLASS TTY IDLE SINCE
+        # shellcheck disable=SC2086  # split the loginctl row into its columns
         set -- $line; uid="${2:-}"; user="${3:-}"
         [ -n "$uid" ] && [ "$uid" -ge 1000 ] 2>/dev/null || continue
         case "$seen" in *" $uid "*) continue ;; esac
@@ -533,7 +534,8 @@ heal() {
         fi
         if ! dns_ok; then
             log "IP works but DNS fails — flushing resolver"
-            dns_fix && log "DNS recovered" || log "DNS still failing after resolver restart"
+            if dns_fix; then log "DNS recovered"
+            else log "DNS still failing after resolver restart"; fi
         fi
         log "healthy (status=$st)"
         mnote "WARP heal" "Healthy: internet $(dns_ok && echo 'and DNS work' || echo 'works, DNS still failing'); WARP $st." network-vpn
@@ -639,7 +641,8 @@ purge_cmd() {
     TAG="warp-killswitch[purge]"
     if artifacts_present; then
         log "warp-svc stopped with leftovers ($(artifacts_desc)) — purging"
-        purge_artifacts && log "clean" || log "! could not fully purge: $(artifacts_desc)"
+        if purge_artifacts; then log "clean"
+        else log "! could not fully purge: $(artifacts_desc)"; fi
         flush_resolver
     fi
     return 0

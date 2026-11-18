@@ -35,6 +35,7 @@
 #
 # Needs passwordless sudo for the helper, e.g. in /etc/sudoers.d/warp-killswitch:
 #   <user> ALL=(root) NOPASSWD: /usr/local/bin/warp-killswitch
+import contextlib
 import fcntl
 import html
 import os
@@ -192,7 +193,7 @@ def show_status():
 LABEL_DOWN = "\U0001F534  Last Resort: Tear Down (reset internet)"
 LABEL_UP = "\U0001F7E2  Rebuild WARP + restore DNS"
 LABEL_HEAL = "\U0001FA7A  Heal now (auto-repair)"
-LABEL_STATUS = "ℹ️  Status"
+LABEL_STATUS = "\u2139\ufe0f  Status"
 LABEL_PROTON_ON = "\U0001F7E1  Proton VPN: Connect (parks WARP first)"
 LABEL_PROTON_OFF = "⏹️  Proton VPN: Disconnect → rebuild WARP"
 
@@ -384,10 +385,9 @@ else:
             menu.popup(None, None, Gtk.StatusIcon.position_menu, icon, button, time)
         pixbufs = {}
         for p in ICONS:
-            try:
+            # icon not installed yet: fall back to a themed icon
+            with contextlib.suppress(GLib.Error):
                 pixbufs[p] = GdkPixbuf.Pixbuf.new_from_file_at_size(p, 22, 22)
-            except GLib.Error:
-                pass  # icon not installed yet: fall back to a themed icon
         icon = Gtk.StatusIcon()
         icon.connect("activate", on_activate)
         icon.connect("popup-menu", on_popup)

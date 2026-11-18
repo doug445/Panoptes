@@ -196,6 +196,7 @@ LOG="$LOGDIR/netmaster-$CMD-$STAMP.log"
 
 # We run under sudo, so everything we create here is root-owned. Hand the log
 # directory back to the human who invoked us, or they cannot read their own logs.
+# shellcheck disable=SC2329  # the EXIT trap below calls it
 own_back() {
     [ -n "${SUDO_UID:-}" ] || return 0
     /usr/bin/chown -R "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" "$LOGDIR" 2>/dev/null || true
@@ -623,6 +624,7 @@ report() {
 
 # R1. Kill routes into down devices. Deleting the DEVICE removes every route
 #     bound to it atomically — that is why this beats any route-by-route loop.
+# shellcheck disable=SC2329  # rungs are called by name from the repair ladder in cmd_fix
 fix_blackhole() {
     detect_blackhole
     [ "$BLACKHOLE_N" -gt 0 ] || return 1
@@ -636,9 +638,9 @@ fix_blackhole() {
         [ "$DRY" -eq 0 ] && { $MKDIR -p "$BAKDIR"; $IP -4 route show 2>/dev/null | $GREP " dev $dev" > "$BAKDIR/routes-$dev.txt"; }
         # Flush BY DEVICE. Never feed route lines to `ip route del` — they end in
         # the output-only status flag `linkdown`, so every delete silently fails.
-        act "flush v4 routes on $dev" "" $IP -4 route flush dev "$dev"
-        act "flush v6 routes on $dev" "" $IP -6 route flush dev "$dev"
-        act "delete interface $dev"   "" $IP link del "$dev"
+        act "flush v4 routes on $dev" "" "$IP" -4 route flush dev "$dev"
+        act "flush v6 routes on $dev" "" "$IP" -6 route flush dev "$dev"
+        act "delete interface $dev"   "" "$IP" link del "$dev"
     done
     return 0
 }
@@ -702,6 +704,7 @@ EOF
 }
 
 # R3. Remove initrd-generated shadow profiles.
+# shellcheck disable=SC2329  # called by name from the repair ladder
 fix_shadow_profiles() {
     detect_shadow_profiles
     [ -n "$SHADOW_PROFILES" ] || return 1
@@ -710,9 +713,9 @@ fix_shadow_profiles() {
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         backup_file "$f"
-        act "remove shadow profile $(/usr/bin/basename "$f")" "" $RM -f "$f"
+        act "remove shadow profile $(/usr/bin/basename "$f")" "" "$RM" -f "$f"
     done <<<"$SHADOW_PROFILES"
-    act "reload NM connections" "" $NM connection reload
+    act "reload NM connections" "" "$NM" connection reload
     return 0
 }
 
@@ -770,6 +773,7 @@ fix_fw_lockout() {
 }
 
 # R6. killswitch immutability deadlock.
+# shellcheck disable=SC2329  # called by name from the repair ladder
 fix_killswitch_state() {
     detect_killswitch
     local did=1
@@ -777,29 +781,31 @@ fix_killswitch_state() {
         step "R6  DNS swapped to plain but resolved.conf is immutable (writes are EPERM)"
         backup_file "$RESOLVED_CONF"
         act "drop the immutable flag on resolved.conf" "$CHATTR +i $RESOLVED_CONF" \
-            $CHATTR -i "$RESOLVED_CONF"
+            "$CHATTR" -i "$RESOLVED_CONF"
         [ "$DRY" -eq 0 ] && : > "$RESOLVED_CONF.warpkill-relock"
         info "re-run 'warp-killswitch down' to actually write the plain-DNS config"
         did=0
     fi
     if [ "$KS_KILLED" -eq 0 ] && [ "$KS_RELOCK" -eq 1 ]; then
         step "R6b orphaned relock marker"
-        act "remove orphaned relock marker" "" $RM -f "$RESOLVED_CONF.warpkill-relock"
+        act "remove orphaned relock marker" "" "$RM" -f "$RESOLVED_CONF.warpkill-relock"
         did=0
     fi
-    return $did
+    return "$did"
 }
 
 # R7. Bounce the stack. Cheap, and it is what makes NM re-read everything above.
+# shellcheck disable=SC2329  # called by name from the repair ladder
 fix_bounce() {
     step "R7  restart the network stack"
-    act "restart systemd-resolved" "" $SCTL restart systemd-resolved
-    act "restart NetworkManager"   "" $SCTL restart NetworkManager
+    act "restart systemd-resolved" "" "$SCTL" restart systemd-resolved
+    act "restart NetworkManager"   "" "$SCTL" restart NetworkManager
     [ "$DRY" -eq 0 ] && /usr/bin/sleep 5
     return 0
 }
 
 # R8. Wi-Fi driver reload. Last resort — it drops the association.
+# shellcheck disable=SC2329  # called by name from the repair ladder
 fix_wifi_driver() {
     # A driver reload cannot fix a resolver: if IP already flows, there is
     # nothing here for it to do.
@@ -807,12 +813,12 @@ fix_wifi_driver() {
     [ -d /sys/module/brcmfmac ] || { info "brcmfmac not loaded — skipping driver reload"; return 1; }
     step "R8  reload the Wi-Fi driver (this WILL drop the association)"
     confirm "  reload brcmfmac?" || return 1
-    act "unblock rfkill"        "" $RFKILL unblock wifi
+    act "unblock rfkill"        "" "$RFKILL" unblock wifi
     act "remove brcmfmac"       "" /usr/sbin/modprobe -r brcmfmac
     [ "$DRY" -eq 0 ] && /usr/bin/sleep 2
     act "load brcmfmac"         "" /usr/sbin/modprobe brcmfmac
     [ "$DRY" -eq 0 ] && /usr/bin/sleep 6
-    act "restart NetworkManager" "" $SCTL restart NetworkManager
+    act "restart NetworkManager" "" "$SCTL" restart NetworkManager
     [ "$DRY" -eq 0 ] && /usr/bin/sleep 6
     return 0
 }
@@ -944,7 +950,7 @@ cmd_harden() {
 
     step "H5  verify"
     ladder; ladder_line
-    detect_guard && ok "guard active" || bad "guard NOT active"
+    if detect_guard; then ok "guard active"; else bad "guard NOT active"; fi
     echo "  log: $LOG"
 }
 
@@ -1054,6 +1060,9 @@ cmd_portal() {
     discover
 
     step "P1  WARP down"
+    # The fallback runs when the killswitch is absent or its "down" fails —
+    # either way warp-svc must still come down.
+    # shellcheck disable=SC2015
     [ -x "$KILLSWITCH" ] && act "warp-killswitch down" "" $KILLSWITCH down \
         || { act "stop warp-svc" "" $SCTL stop warp-svc; act "disable warp-svc" "" $SCTL disable warp-svc
              # no killswitch to swap DNS for us — the banner promised plain DNS
@@ -1273,7 +1282,8 @@ cmd_warp() {
         echo "  routes in MAIN via $WARP_IF: $($IP -4 route show 2>/dev/null | $GREP -c "dev $WARP_IF")  (must be 0)"
         echo "  routes in table 65743:       $($IP route show table 65743 2>/dev/null | $GREP -c "dev $WARP_IF")  (normal when connected)"
         echo "  NM manages the tun:          $($NM -t -f DEVICE,STATE device status 2>/dev/null | $AWK -F: -v i="$WARP_IF" '$1==i{print $2; f=1} END{if(!f)print "<absent>"}')  (must be 'unmanaged')"
-        detect_guard && ok "durable guard installed" || bad "durable guard MISSING — run: netmaster harden"
+        if detect_guard; then ok "durable guard installed"
+        else bad "durable guard MISSING — run: netmaster harden"; fi
         if $SCTL is-active --quiet warp-watchdog 2>/dev/null; then ok "warp-watchdog active — blackholes self-heal"
         else warn "warp-watchdog not running — run: sudo warp-killswitch install"; fi
         ;;
@@ -1391,7 +1401,7 @@ cmd_wifi() {
     /usr/bin/journalctl -b -k --no-pager 2>/dev/null \
         | $GREP -iE 'brcmfmac|firmware fail|direct firmware load|nvram' | /usr/bin/tail -30 | $SED 's/^/  /'
     detect_brcmfmac
-    [ "$FW_ERRS" -eq 1 ] && bad "firmware/NVRAM errors present" || ok "no firmware load failures"
+    if [ "$FW_ERRS" -eq 1 ]; then bad "firmware/NVRAM errors present"; else ok "no firmware load failures"; fi
     hdr "external deep-capture tools"
     local t
     for t in /usr/local/bin/wifi-recover.sh $(sibling wifi-recovery/wifi-recover.sh); do
