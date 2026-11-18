@@ -17,10 +17,22 @@ jobs:
     name: shellcheck (bash tools)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      # Pinned upstream release, hash-checked, rather than Ubuntu's package:
+      # the apt build (0.9.0) misreports functions called through a trap or by
+      # name as unreachable (SC2317), which would make the style gate noise.
+      - name: Install shellcheck 0.11.0
+        env:
+          SC_VER: v0.11.0
+          SC_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          curl -fsSL --proto =https -o sc.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/$SC_VER/shellcheck-$SC_VER.linux.x86_64.tar.xz"
+          echo "$SC_SHA256  sc.tar.xz" | sha256sum -c -
+          tar -xJf sc.tar.xz
+          sudo install -m 0755 "shellcheck-$SC_VER/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
 
       - name: Syntax check
         run: |
@@ -29,34 +41,26 @@ jobs:
             if head -1 "$f" | grep -q bash; then bash -n "$f"; fi
           done
 
-      - name: ShellCheck (warnings are fatal)
+      - name: ShellCheck (style level is fatal)
         run: |
           files=""
           for f in bin/* install.sh uninstall.sh; do
             [ -f "$f" ] || continue
             if head -1 "$f" | grep -q bash; then files="$files $f"; fi
           done
-          # The tree is clean at warning level. Intentional word splitting
-          # carries an inline `shellcheck disable=SC2046` with its reason, so a
-          # new warning here means new code, not legacy noise.
+          # The tree is clean down to style level. Intentional word splitting,
+          # functions called by name and the like carry an inline
+          # `shellcheck disable=` with the reason, so a finding here means new
+          # code, not legacy noise. SC2016 (no expansion in single quotes) is
+          # excluded: every hit is an awk program or literal help text.
           # shellcheck disable=SC2086
-          shellcheck -S warning $files
-
-      - name: ShellCheck style, SC2xxx info level (informational)
-        continue-on-error: true
-        run: |
-          files=""
-          for f in bin/* install.sh uninstall.sh; do
-            [ -f "$f" ] || continue
-            if head -1 "$f" | grep -q bash; then files="$files $f"; fi
-          done
-          shellcheck -S style $files || true
+          shellcheck -S style -e SC2016 $files
 
   python:
     name: ruff + compile (python tools)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -72,7 +76,7 @@ jobs:
       - name: Install ruff
         run: pip install ruff
 
-      - name: Ruff (full default ruleset is fatal)
+      - name: Ruff (default ruleset + bug-finding sets are fatal)
         run: |
           files=""
           for f in bin/*; do
@@ -80,11 +84,14 @@ jobs:
             if head -1 "$f" | grep -q python; then files="$files $f"; fi
           done
           [ -n "$files" ] || { echo "no python tools found"; exit 0; }
-          # Clean under the full default ruleset. --isolated so a stray config
-          # cannot quietly change what this gate means.
-          ruff check --isolated --no-cache $files
+          # Clean under the default ruleset plus bugbear, simplify, ruff's own,
+          # perf, pylint errors/warnings, pyupgrade, blind-except and import
+          # order. --isolated so a stray config cannot quietly change what
+          # this gate means.
+          ruff check --isolated --no-cache \
+            --extend-select B,SIM,RUF,PERF,PLE,PLW,UP,BLE,I,C4,PIE,RET $files
 
-      - name: Ruff style (informational)
+      - name: Ruff, every rule (informational)
         continue-on-error: true
         run: |
           files=""
@@ -92,13 +99,13 @@ jobs:
             [ -f "$f" ] || continue
             if head -1 "$f" | grep -q python; then files="$files $f"; fi
           done
-          ruff check --isolated --no-cache --output-format=concise $files || true
+          ruff check --isolated --no-cache --select ALL --statistics $files || true
 
   license:
     name: license headers
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Every tool carries an SPDX MIT header
         run: |
           missing=0
