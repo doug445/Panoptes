@@ -5,6 +5,67 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [3.2.0] — 2026-11-23
+
+`panoptes-triage`: every sensor on one timeline.
+
+### Added
+
+- **`panoptes-triage`**, installed to `/usr/local/bin` so `sudo
+  panoptes-triage` finds it. Each Panoptes sensor judges its own events
+  alone; an intrusion is a chain that no single sensor sees. This reads
+  them all into one ordered timeline, strictly read-only:
+  `persistwatch`'s log (a row seen before, last week or in the
+  start-of-day listing, is marked recurring and kept quiet), `netwatch`'s
+  events with drops folded per source, the kill-switch log, OpenSnitch's
+  rule files (else its log's "Saved new rule" lines), `efi-tripwire`'s
+  checks with a mismatch reduced to the changed, added and removed paths,
+  each `aide-check.service` run and the AIDE report's counts, auditd's
+  keyed rules folded by who did what to what, the journal's sudo, sshd,
+  USB, segfault and promiscuous-mode lines, every PAM service's auth
+  failures, and the package manager's own history (rpm, `dpkg.log` or
+  `pacman.log`).
+- **Severity** — *alert* for a new SSH key, sudoers rule or account,
+  setuid outside `/usr` and `/opt`, anything that names `/tmp`, `/var/tmp`
+  or `/dev/shm`, an ESP mismatch, an ARP spoof or sustained attack, an
+  accepted SSH login, a `pam_faillock` lockout, or a sensor that is down or
+  whose last run failed; *notice*, *info* and *context* below it.
+- **Correlated windows** — notice-and-above events no more than `--window`
+  minutes (15) apart that span two or more sensors, or hold an alert. A
+  package transaction in the window or up to 30 minutes before it is
+  attached as a possible explanation, not a verdict.
+- **Sensor health and coverage** — whether auditd, osqueryd,
+  `persistwatch`, OpenSnitch, the WARP watchdog, the AIDE and
+  `efi-tripwire` checks and `netwatch` are running and passing, and every
+  source it could not read, with the reason, never silently skipped. Under
+  `sudo` it checks `auditctl -l` and flags a loaded `-a never,task`
+  (Fedora's stock `audit.rules`), which leaves every keyed rule unable to
+  fire, and records the kernel dropped.
+- **Auth failures from every PAM service** — journal lines, `USER_AUTH`
+  audit records and the `faillock` tally, merged; bursts per user, marked
+  *machine speed* when sub-second or metronomic (a failing module such as
+  `pam_fprintd` with no reader, or a script, not a person), failures that
+  began inside a lockout (the right password being refused), accounts
+  locked right now, and PAM configured for a fingerprint reader that does
+  not exist.
+- **`--format prompt`** wraps the timeline for an LLM to triage. Every
+  string is stripped of ANSI and control characters, collapsed and capped;
+  the data is JSON-encoded inside a fence carrying a random per-run nonce,
+  so a planted fake fence cannot close it; the preamble tells the model the
+  block is attacker-influenced data and to explain any command before
+  recommending it. The tool runs no model and takes no action.
+- `--since` (`90m`, `24h`, `7d`, a date or date and time), `-v`,
+  `--min-severity`, `--sources`, `--list-sources`, `--format json`,
+  `--include-initial`, `--max-events`. Every log path can be pointed
+  elsewhere with `PANOPTES_TRIAGE_<NAME>` for testing against synthetic
+  logs.
+
+### Tested
+
+- On Fedora 45 as a user and under `sudo` against real logs, 24 h and 7 d
+  (about 7 s for a week). The `dpkg.log` and `pacman.log` readers are
+  written but not yet run on those distributions.
+
 ## [3.1.10] — 2026-11-18
 
 The tools are clean at ShellCheck's style level, and CI now holds them there.
@@ -827,6 +888,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[3.2.0]: https://github.com/doug445/Panoptes/releases/tag/v3.2.0
 [3.1.10]: https://github.com/doug445/Panoptes/releases/tag/v3.1.10
 [3.1.9]: https://github.com/doug445/Panoptes/releases/tag/v3.1.9
 [3.1.8]: https://github.com/doug445/Panoptes/releases/tag/v3.1.8
