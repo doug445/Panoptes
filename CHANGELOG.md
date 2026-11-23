@@ -5,6 +5,20 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [3.2.1] — 2026-11-23
+
+AIDE finding changes is no longer reported as a failed sensor.
+
+### Fixed
+
+- **`panoptes-triage` raised "aide-check.service: last run failed" on every
+  run that found changes.** `aide --check` exits 1–7 when files were added,
+  removed or changed, and systemd records that as `Result=exit-code`. The
+  sensor-health check read it as a failure, an alert, while the AIDE
+  collector beside it correctly reported the same run as a notice. An exit
+  of 1–7 now shows as healthy ("last run found changes"); a crash, a kill
+  or any other exit code is still an alert.
+
 ## [3.2.0] — 2026-11-23
 
 `panoptes-triage`: every sensor on one timeline.
@@ -888,6 +902,7 @@ scripts.
 - `install.sh` / `uninstall.sh`, MIT licence, and CI running shellcheck at
   warning level and ruff's full default ruleset as fatal gates.
 
+[3.2.1]: https://github.com/doug445/Panoptes/releases/tag/v3.2.1
 [3.2.0]: https://github.com/doug445/Panoptes/releases/tag/v3.2.0
 [3.1.10]: https://github.com/doug445/Panoptes/releases/tag/v3.1.10
 [3.1.9]: https://github.com/doug445/Panoptes/releases/tag/v3.1.9
