@@ -64,7 +64,7 @@ import subprocess
 import sys
 import time
 
-VERSION = '3.2.0'
+VERSION = '3.2.1'
 
 SEVERITY = {'context': 0, 'info': 1, 'notice': 2, 'alert': 3}
 
@@ -1017,7 +1017,7 @@ def _unit_state(unit, user=None):
     argv = ['systemctl']
     if user:
         argv += ['--user'] + (['--machine', f'{user}@'] if os.geteuid() == 0 else [])
-    argv += ['show', unit, '-p', 'LoadState,ActiveState,SubState,Result,Type']
+    argv += ['show', unit, '-p', 'LoadState,ActiveState,SubState,Result,Type,ExecMainCode,ExecMainStatus']
     out = run_cmd(argv, timeout=15)
     if out is None:
         return None
@@ -1043,7 +1043,16 @@ def c_sensors(run):
         seen += 1
         active, result = st.get('ActiveState'), st.get('Result', 'success')
         if unit in checks:
-            if result != 'success' or active == 'failed':
+            # aide --check exits 1-7 when it finds added/removed/changed files: the check
+            # ran, and the aide collector reports what it found. systemd still calls that
+            # a failure (Result=exit-code); only a crash or another exit code is one here.
+            aide_changes = (unit == 'aide-check.service' and result == 'exit-code'
+                            and st.get('ExecMainCode') == '1'  # CLD_EXITED, not killed or dumped
+                            and st.get('ExecMainStatus', '0').isdigit()
+                            and 1 <= int(st['ExecMainStatus']) <= 7)
+            if aide_changes:
+                up.append(f'{unit} (last run found changes)')
+            elif result != 'success' or active == 'failed':
                 run.add(now, src, 'sensor_failing', 'alert', f'{unit}: last run failed ({result})', unit=unit)
             else:
                 up.append(unit)
