@@ -163,14 +163,15 @@ ech-browsers.sh       # turn on Encrypted Client Hello in every browser you have
 sudo warp-setup.sh    # Cloudflare WARP: repository, client, registration, kill-switch service
 proton-fallback on    # park WARP and bring Proton VPN up instead (sign in once first)
 persistcheck          # everything persistent or exposed right now, and what changed since last time
+sudo panoptes-triage  # every sensor's last 24 h on one timeline, cross-sensor clusters grouped
 ```
 
 The installer copies tools, installs dependencies after asking, installs the
 Proton VPN client and the endpoint pair (OpenSnitch, osquery) after asking,
 and wires the two tray helpers. The services it enables are the WARP watchdog
 (only when WARP is installed), `opensnitch`, `osqueryd` and `persistwatch`.
-`audit-dns.sh`, `netcheck`, `nettop`, `checkdns` and `dns-status.sh` are
-strictly read-only.
+`audit-dns.sh`, `netcheck`, `nettop`, `checkdns`, `dns-status.sh` and
+`panoptes-triage` are strictly read-only.
 
 ---
 
@@ -308,6 +309,7 @@ action did not run instead of pretending it did.
 | **`probesource`** | **The centrepiece.** Investigate any address — a firewall drop, a probe, a live connection. Pass one in as `probesource <ip>`, or pick a target from the UFW journal, the `netwatch` log, the live `ss` table, or type one in. Then run a single tactic, a one-pass sweep, or a relentless escalating sweep. Passive tactics: `whois`, reverse DNS, GeoIP, journal and `netwatch` history, neighbour table and OUI lookup, live socket state, conntrack, ipset membership, short `tcpdump`/`tshark` capture, and a `p0f` fingerprint listener. The target is validated once, at entry, as a strict IPv4 or IPv6 literal before any tactic sees it. |
 | **`nettop`** | Lists hosts on the LAN and WAN with vendor attribution — active `arp-scan` for the LAN, falling back to `ip neigh` plus OUI lookup, with `whois` filling in vendor for public addresses. |
 | **`netcheck`** | Read-only network status readout: every interface, Wi-Fi SSID, band, channel, frequency, protocol and bitrate for each adapter, MAC randomization state, firewall state, listening ports with the owning process, WARP state with an exit check, live DNSSEC and DoT verification, and cached `whois` for public addresses (private ranges are skipped). |
+| **`panoptes-triage`** | **One timeline from every eye.** Each sensor judges its own events alone; an intrusion is a chain (a new allow rule, then a new unit, then a listener, then a changed hook file) that no single sensor sees. This reads them all — `persistwatch`, `netwatch`, the kill-switch log, OpenSnitch's rules, `efi-tripwire`, AIDE, auditd, the journal's sudo/sshd/USB lines, every PAM service's auth failures and `pam_faillock` lockouts, and the package manager's own history (the usual innocent explanation) — into one ordered, severity-ranked timeline, and groups events from *different* sensors that land within 15 minutes of each other, with any package transaction nearby attached as a possible explanation. Says which sensors are down or failing, and lists every source it could not read rather than skipping it. `--since 7d`, `-v`, `--sources`, `--format json`; `--format prompt` wraps the timeline for an LLM to triage, fenced with a random per-run marker and labelled as untrusted data, because process names and paths are attacker-chosen strings. Strictly read-only: it runs no model and takes no action. Runs as a user; under `sudo` it also reads auditd (and warns when a loaded `-a never,task` leaves every keyed rule unable to fire), the AIDE report and OpenSnitch's rule files. |
 
 ### Endpoint — outbound firewall and persistence watch
 
@@ -423,6 +425,7 @@ hardening is what is preventing you from ever seeing the login page.
 | Blocks outbound connections you have not approved | **yes** — OpenSnitch, per application | no | no | no |
 | Lists what runs at boot or login, and alerts when that changes | **yes** — osquery pack, `persistcheck`, `persistwatch` | no | no | no |
 | Investigates an unknown source IP | **yes**, 11 tactics | no | packet-level only | no |
+| Puts every sensor's events on one timeline and groups what lands together | **yes** — `panoptes-triage` | no | no | no |
 | Watches firewall drops + ARP anomalies | **yes** | no | yes, manually | logs only |
 | Recovers a broken Wi-Fi link | **yes** | no | no | no |
 | Desktop tray integration | **yes** | no | no | no |
@@ -551,7 +554,7 @@ touching your system.
 
 | Path | From |
 |---|---|
-| `/usr/local/bin/{netmaster,probesource,wifi-recover.sh,audit-dns.sh,harden-dns.sh,warp-killswitch,dns-toggle,panoptes-deps.sh,ech-build.sh,ech-browsers.sh,warp-setup.sh,proton-setup.sh,endpoint-setup.sh,persistwatch}` | system tools |
+| `/usr/local/bin/{netmaster,probesource,wifi-recover.sh,audit-dns.sh,harden-dns.sh,warp-killswitch,dns-toggle,panoptes-deps.sh,ech-build.sh,ech-browsers.sh,warp-setup.sh,proton-setup.sh,endpoint-setup.sh,persistwatch,panoptes-triage}` | system tools |
 | `~/.local/bin/{netcheck,netwatch,nettop,checkdns,dns-tray,dns-status.sh,warp-tray,proton-fallback,persistcheck}` | user tools |
 | `~/.local/share/icons/{adguard-green,cloudflare-shield,warp-green,warp-red,warp-parked,proton-yellow}.svg` | tray icons |
 | `/etc/NetworkManager/conf.d/mac-randomization.conf` | full install, unless `--no-mac-random` or a Broadcom driver that cannot clone |
@@ -743,7 +746,7 @@ worth reporting.
 
 `audit-dns.sh`, `netcheck`, `nettop`, `checkdns`, `dns-status.sh`,
 `proton-fallback status`, `persistcheck` (it writes only its own snapshot
-under `~/.local/state`) and `wifi-recover.sh` (without `--repair`) make **no
+under `~/.local/state`), `panoptes-triage` and `wifi-recover.sh` (without `--repair`) make **no
 changes to the system**. Everything that writes says so; `harden-dns.sh`,
 `ech-browsers.sh`, `warp-setup.sh`, `proton-setup.sh`, `proton-fallback`,
 `netmaster` and the installers support `--dry-run`.

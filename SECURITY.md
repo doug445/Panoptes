@@ -67,7 +67,7 @@ programs. That is the interesting surface:
 * **Anything that writes outside its documented paths**, or that a read-only
   tool writes at all. `audit-dns.sh`, `netcheck`, `nettop`, `checkdns`,
   `dns-status.sh`, `persistcheck` (beyond its own snapshot under
-  `~/.local/state/panoptes`) and `wifi-recover.sh` without `--repair` must
+  `~/.local/state/panoptes`), `panoptes-triage` and `wifi-recover.sh` without `--repair` must
   change nothing.
 * **The installers fetching or trusting the wrong thing.** `panoptes-deps.sh`,
   `warp-setup.sh`, `ech-build.sh` and `ech-browsers.sh` all run as root and pull

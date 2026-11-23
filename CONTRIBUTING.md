@@ -20,7 +20,7 @@ Know which half of the suite you are in:
 - **Read-only, safe anywhere:** `audit-dns.sh`, `checkdns`, `dns-status.sh`,
   `netcheck`, `nettop`, `probesource` (passive tactics), `proton-fallback
   status`/`state`, `persistcheck` (writes only its snapshot under
-  `~/.local/state/panoptes`), `panoptes-deps.sh --check`, `proton-setup.sh
+  `~/.local/state/panoptes`), `panoptes-triage`, `panoptes-deps.sh --check`, `proton-setup.sh
   --check`, `endpoint-setup.sh --check`, `warp-setup.sh --check`, and
   `wifi-recover.sh` without `--repair`.
 - **Writes:** `harden-dns.sh`, `dns-toggle`, `warp-killswitch`, `netmaster`,

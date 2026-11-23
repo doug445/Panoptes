@@ -58,7 +58,7 @@ NM_DIR=/etc/NetworkManager/conf.d
 
 SYS_TOOLS=(netmaster probesource wifi-recover.sh audit-dns.sh harden-dns.sh warp-killswitch dns-toggle
            panoptes-deps.sh ech-build.sh ech-browsers.sh warp-setup.sh proton-setup.sh
-           endpoint-setup.sh persistwatch)
+           endpoint-setup.sh persistwatch panoptes-triage)
 USER_TOOLS=(netcheck netwatch nettop checkdns dns-tray dns-status.sh warp-tray proton-fallback persistcheck)
 DNS_SYS=(audit-dns.sh harden-dns.sh dns-toggle)
 DNS_USER=(checkdns dns-status.sh dns-tray)
